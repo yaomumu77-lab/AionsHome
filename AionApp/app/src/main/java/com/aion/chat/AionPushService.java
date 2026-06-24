@@ -36,6 +36,7 @@ import android.os.SystemClock;
 import android.util.Base64;
 import android.util.DisplayMetrics;
 import android.util.Log;
+import android.webkit.CookieManager;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
@@ -111,6 +112,7 @@ import java.util.UUID;
 public class AionPushService extends Service {
 
     private static final String TAG = "AionPush";
+    public static final String ACTION_REFRESH_CLOUDFLARE_AUTH = "refresh_cloudflare_auth";
 
     private static final String CH_KEEPALIVE = "aion_keepalive";
     private static final String CH_MESSAGE   = "aion_message";
@@ -129,6 +131,7 @@ public class AionPushService extends Service {
 
     private final AtomicInteger wsGeneration = new AtomicInteger(0);
     private final AtomicBoolean wsConnected = new AtomicBoolean(false);
+    private final AtomicBoolean wsConnecting = new AtomicBoolean(false);
 
     private volatile int reconnectDelay = 3000;
     private static final int MAX_RECONNECT_DELAY = 30000;
@@ -238,6 +241,17 @@ public class AionPushService extends Service {
                 .pingInterval(30, TimeUnit.SECONDS)
                 .readTimeout(0, TimeUnit.SECONDS)
                 .connectTimeout(10, TimeUnit.SECONDS)
+                .addInterceptor(chain -> {
+                    Request original = chain.request();
+                    if (!ConnectionEndpoint.isCloudflareHost(original.url().host())) {
+                        return chain.proceed(original);
+                    }
+                    String cookie = getCloudflareCookie();
+                    if (cookie == null) return chain.proceed(original);
+                    return chain.proceed(original.newBuilder()
+                            .header("Cookie", cookie)
+                            .build());
+                })
                 .build();
 
         registerNetworkCallback();
@@ -246,12 +260,20 @@ public class AionPushService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        boolean endpointChanged = false;
         if (intent != null) {
             String action = intent.getStringExtra("action");
             if ("set_foreground".equals(action)) {
                 isForegroundActive = intent.getBooleanExtra("active", false);
                 if (isForegroundActive) stopMusic(); // WebView 接管，停止原生播放
                 Log.d(TAG, "foreground=" + isForegroundActive);
+                return START_STICKY;
+            }
+            if (ACTION_REFRESH_CLOUDFLARE_AUTH.equals(action)) {
+                if (isCloudflareServer() && !wsConnected.get()) {
+                    reconnectDelay = 3000;
+                    connectWebSocket();
+                }
                 return START_STICKY;
             }
             if (ACTION_START_PHONE_SCREEN.equals(action)) {
@@ -271,15 +293,13 @@ public class AionPushService extends Service {
 
             String url = intent.getStringExtra("url");
             if (url != null) {
-                String ws = url.replace("http://", "ws://").replace("https://", "wss://");
-                if (!ws.endsWith("/ws")) {
-                    ws = ws.replace("/chat", "/ws");
-                    if (!ws.endsWith("/ws")) ws += "/ws";
-                }
+                String ws = ConnectionEndpoint.toWebSocketUrl(url);
                 if (ws.equals(serverUrl) && wsConnected.get()) {
                     Log.d(TAG, "Already connected to " + serverUrl);
                     return START_STICKY;
                 }
+                endpointChanged = serverUrl != null && !ws.equals(serverUrl);
+                if (endpointChanged) resetWebSocketForEndpointChange();
                 serverUrl = ws;
             }
         }
@@ -287,8 +307,11 @@ public class AionPushService extends Service {
         if (serverUrl == null) {
             SharedPreferences prefs = getSharedPreferences("aion_prefs", MODE_PRIVATE);
             String saved = prefs.getString("saved_url", "http://192.168.xx.xxx:8080/chat");
-            serverUrl = saved.replace("http://", "ws://").replace("https://", "wss://")
-                             .replace("/chat", "/ws");
+            String normalized = ConnectionEndpoint.normalizePageUrl(saved);
+            if (!normalized.equals(saved)) {
+                prefs.edit().putString("saved_url", normalized).apply();
+            }
+            serverUrl = ConnectionEndpoint.toWebSocketUrl(normalized);
         }
 
         Log.i(TAG, "onStartCommand url=" + serverUrl);
@@ -313,7 +336,19 @@ public class AionPushService extends Service {
         startLocationThread();
         startActivityThread();
         startRingSyncThread();
+        if (endpointChanged) connectWebSocket();
         return START_STICKY;
+    }
+
+    private synchronized void resetWebSocketForEndpointChange() {
+        wsGeneration.incrementAndGet();
+        wsConnected.set(false);
+        wsConnecting.set(false);
+        WebSocket old = webSocket;
+        webSocket = null;
+        if (old != null) {
+            try { old.cancel(); } catch (Exception ignored) {}
+        }
     }
 
     @Nullable @Override
@@ -615,24 +650,14 @@ public class AionPushService extends Service {
         if (ringSyncThread != null && ringSyncThread.isAlive()) return;
         ringSyncThread = new Thread(() -> {
             Log.i(TAG, "💍 Ring sync thread started");
+            runRingBackgroundSyncOnce();
             while (shouldRun) {
                 long delay = computeNextRingSyncDelayMs();
                 Log.i(TAG, "💍 next background ring sync in " + (delay / 1000) + "s");
                 try { Thread.sleep(delay); }
                 catch (InterruptedException e) { break; }
                 if (!shouldRun) break;
-                try {
-                    if (ringBackgroundSync == null) {
-                        ringBackgroundSync = new RingBackgroundSync();
-                    }
-                    ringBackgroundSync.syncHeartHistoryOnce();
-                } catch (Exception e) {
-                    Log.e(TAG, "💍 sync failed: " + e.getMessage());
-                    if (ringBackgroundSync != null) {
-                        ringBackgroundSync.close();
-                        ringBackgroundSync = null;
-                    }
-                }
+                runRingBackgroundSyncOnce();
             }
             if (ringBackgroundSync != null) {
                 ringBackgroundSync.close();
@@ -642,6 +667,21 @@ public class AionPushService extends Service {
         }, "AionRingSync");
         ringSyncThread.setDaemon(false);
         ringSyncThread.start();
+    }
+
+    private void runRingBackgroundSyncOnce() {
+        try {
+            if (ringBackgroundSync == null) {
+                ringBackgroundSync = new RingBackgroundSync();
+            }
+            ringBackgroundSync.syncHeartHistoryOnce();
+        } catch (Exception e) {
+            Log.e(TAG, "💍 sync failed: " + e.getMessage());
+            if (ringBackgroundSync != null) {
+                ringBackgroundSync.close();
+                ringBackgroundSync = null;
+            }
+        }
     }
 
     private long computeNextRingSyncDelayMs() {
@@ -669,6 +709,15 @@ public class AionPushService extends Service {
         private static final String KEY_DEVICE_ADDRESS = "device_address";
         private static final String KEY_DEVICE_NAME = "device_name";
         private static final String KEY_LAST_HEART_MEASURED_AT = "bg_last_heart_measured_at";
+        private static final String KEY_SYNC_FAIL_COUNT = "bg_sync_fail_count";
+        private static final String KEY_NEXT_SYNC_ATTEMPT_AT = "bg_next_sync_attempt_at";
+        private static final String KEY_LAST_SYNC_FAILURE = "bg_last_sync_failure";
+        private static final String KEY_PAGE_CONNECTED = "page_connection_active";
+        private static final String KEY_PAGE_CONNECTED_AT = "page_connection_active_at";
+        private static final long FAILURE_BACKOFF_BASE_MS = 10 * 60_000L;
+        private static final long FAILURE_BACKOFF_MAX_MS = 6 * 60 * 60_000L;
+        private static final long PAGE_CONNECTION_STALE_MS = 15 * 60_000L;
+        private static final long HEART_HISTORY_TIMEOUT_SECONDS = 120;
         private static final int DT_SETTING_TIME = 0x0100;
         private static final int DT_SETTING_HEART_MONITOR = 0x010C;
         private static final int DT_HEALTH_HEART = 0x0506;
@@ -719,6 +768,8 @@ public class AionPushService extends Service {
                 postRingDiag(httpBase, "no_saved_device", "没有保存过戒指设备，后台无法自动同步", 0, 0, 0);
                 return;
             }
+            if (shouldSkipRingSyncForPageConnection(prefs, httpBase)) return;
+            if (shouldSkipRingSyncForBackoff(prefs, httpBase)) return;
             if (!hasBluetoothPermissionsForRing()) {
                 Log.w(TAG, "💍 bluetooth permissions missing");
                 postRingDiag(httpBase, "bluetooth_permission_missing", "蓝牙权限缺失，后台无法连接戒指", 0, 0, 0);
@@ -727,13 +778,15 @@ public class AionPushService extends Service {
             BluetoothDevice device = resolveSavedDevice(savedAddress, savedName);
             if (device == null) {
                 Log.w(TAG, "💍 saved ring not found");
-                postRingDiag(httpBase, "ring_not_found", "没有扫描到已保存戒指 savedName=" + savedName, 0, 0, 0);
+                recordRingSyncFailure(prefs, "ring_not_found");
+                postRingDiag(httpBase, "ring_not_found", "没有扫描到已保存戒指 savedName=" + savedName + backoffDiagSuffix(prefs), 0, 0, 0);
                 return;
             }
             try {
                 connect(device);
                 syncTimeAndMonitorSetting();
                 ArrayList<HeartRateRecord> records = requestHeartHistory();
+                recordRingSyncSuccess(prefs);
                 if (records.isEmpty()) {
                     Log.i(TAG, "💍 no heart history records");
                     postRingDiag(httpBase, "no_records", "已连接戒指，但本次没有读到新的心率历史", 0, 0, 0);
@@ -767,11 +820,89 @@ public class AionPushService extends Service {
                         newestMeasuredAt
                 );
             } catch (Exception e) {
-                postRingDiag(httpBase, "sync_failed", "后台心率同步失败：" + e.getMessage(), 0, 0, 0);
+                recordRingSyncFailure(prefs, e.getClass().getSimpleName() + ": " + e.getMessage());
+                postRingDiag(httpBase, "sync_failed", "后台心率同步失败：" + e.getMessage() + backoffDiagSuffix(prefs), 0, 0, 0);
                 throw e;
             } finally {
                 close();
             }
+        }
+
+        private boolean shouldSkipRingSyncForPageConnection(SharedPreferences prefs, String httpBase) {
+            long now = System.currentTimeMillis();
+            long connectedAt = prefs.getLong(KEY_PAGE_CONNECTED_AT, 0);
+            long ageMs = connectedAt > 0 ? now - connectedAt : Long.MAX_VALUE;
+            if (!prefs.getBoolean(KEY_PAGE_CONNECTED, false)
+                    || connectedAt <= 0
+                    || ageMs > PAGE_CONNECTION_STALE_MS) {
+                return false;
+            }
+            Log.i(TAG, "💍 skip background ring sync, health page owns connection");
+            postRingDiag(
+                    httpBase,
+                    "page_connection_active",
+                    "健康页正在保持戒指连接，交给页面原生定时同步"
+                            + "; pageConnectedAgeMs=" + ageMs
+                            + "; pageConnectedAtMs=" + connectedAt,
+                    0,
+                    0,
+                    0
+            );
+            return true;
+        }
+
+        private boolean shouldSkipRingSyncForBackoff(SharedPreferences prefs, String httpBase) {
+            long now = System.currentTimeMillis();
+            long nextAttemptAt = prefs.getLong(KEY_NEXT_SYNC_ATTEMPT_AT, 0);
+            if (nextAttemptAt <= now) return false;
+            int failCount = prefs.getInt(KEY_SYNC_FAIL_COUNT, 0);
+            long waitMs = nextAttemptAt - now;
+            String reason = prefs.getString(KEY_LAST_SYNC_FAILURE, "");
+            Log.i(TAG, "💍 skip background ring sync, backoff " + (waitMs / 1000) + "s");
+            postRingDiag(
+                    httpBase,
+                    "backoff",
+                    "后台戒指同步暂停以保护电量"
+                            + "; failCount=" + failCount
+                            + "; nextAttemptAtMs=" + nextAttemptAt
+                            + "; waitMs=" + waitMs
+                            + "; lastFailure=" + reason,
+                    0,
+                    0,
+                    0
+            );
+            return true;
+        }
+
+        private void recordRingSyncSuccess(SharedPreferences prefs) {
+            prefs.edit()
+                    .remove(KEY_SYNC_FAIL_COUNT)
+                    .remove(KEY_NEXT_SYNC_ATTEMPT_AT)
+                    .remove(KEY_LAST_SYNC_FAILURE)
+                    .apply();
+        }
+
+        private void recordRingSyncFailure(SharedPreferences prefs, String reason) {
+            int failCount = prefs.getInt(KEY_SYNC_FAIL_COUNT, 0) + 1;
+            long delayMs = computeRingFailureBackoffMs(failCount);
+            long nextAttemptAt = System.currentTimeMillis() + delayMs;
+            prefs.edit()
+                    .putInt(KEY_SYNC_FAIL_COUNT, failCount)
+                    .putLong(KEY_NEXT_SYNC_ATTEMPT_AT, nextAttemptAt)
+                    .putString(KEY_LAST_SYNC_FAILURE, reason == null ? "" : reason)
+                    .apply();
+        }
+
+        private long computeRingFailureBackoffMs(int failCount) {
+            int shift = Math.min(Math.max(failCount - 1, 0), 5);
+            long delay = FAILURE_BACKOFF_BASE_MS * (1L << shift);
+            return Math.min(delay, FAILURE_BACKOFF_MAX_MS);
+        }
+
+        private String backoffDiagSuffix(SharedPreferences prefs) {
+            return "; failCount=" + prefs.getInt(KEY_SYNC_FAIL_COUNT, 0)
+                    + "; nextAttemptAtMs=" + prefs.getLong(KEY_NEXT_SYNC_ATTEMPT_AT, 0)
+                    + "; lastFailure=" + prefs.getString(KEY_LAST_SYNC_FAILURE, "");
         }
 
         private BluetoothDevice resolveSavedDevice(String savedAddress, String savedName) {
@@ -980,8 +1111,12 @@ public class AionPushService extends Service {
             }
             heartLatch = new CountDownLatch(1);
             writePacket(DT_HEALTH_HEART, new byte[0]);
-            try { heartLatch.await(35, TimeUnit.SECONDS); }
+            boolean completed = false;
+            try { completed = heartLatch.await(HEART_HISTORY_TIMEOUT_SECONDS, TimeUnit.SECONDS); }
             catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            if (!completed || !heartDone) {
+                throw new IllegalStateException("heart history timeout");
+            }
             return parseHeartPayloads();
         }
 
@@ -1257,6 +1392,15 @@ public class AionPushService extends Service {
         if (wsConnected.get()) return;
         if (serverUrl == null) { Log.e(TAG, "url=null"); return; }
 
+        // Access authentication comes from the WebView login. Do not follow an
+        // Access redirect as a WebSocket handshake and do not bypass Access.
+        if (isCloudflareServer() && getCloudflareCookie() == null) {
+            Log.i(TAG, "Cloudflare Access session not available yet");
+            updateKeepAlive("等待 Cloudflare 安全登录…");
+            return;
+        }
+        if (!wsConnecting.compareAndSet(false, true)) return;
+
         final int gen = wsGeneration.incrementAndGet();
 
         WebSocket old = webSocket;
@@ -1274,6 +1418,7 @@ public class AionPushService extends Service {
                 public void onOpen(WebSocket ws, Response resp) {
                     if (gen != wsGeneration.get()) { ws.cancel(); return; }
                     Log.i(TAG, ">>> OPEN gen=" + gen);
+                    wsConnecting.set(false);
                     wsConnected.set(true);
                     reconnectDelay = 3000;
                     msgReceived = 0;
@@ -1293,9 +1438,15 @@ public class AionPushService extends Service {
                     if (gen != wsGeneration.get()) return;
                     String err = t != null ? t.getMessage() : "unknown";
                     Log.w(TAG, ">>> FAIL gen=" + gen + ": " + err);
+                    wsConnecting.set(false);
                     wsConnected.set(false);
                     reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
-                    updateKeepAlive("连接失败: " + err);
+                    if (isCloudflareServer() && resp != null
+                            && (resp.code() == 302 || resp.code() == 401 || resp.code() == 403)) {
+                        updateKeepAlive("Cloudflare 登录已过期，请打开 App 重新登录");
+                    } else {
+                        updateKeepAlive("连接失败: " + err);
+                    }
                     // 不在这里阻塞或重连！心跳线程会处理
                 }
 
@@ -1303,11 +1454,13 @@ public class AionPushService extends Service {
                 public void onClosed(WebSocket ws, int code, String reason) {
                     if (gen != wsGeneration.get()) return;
                     Log.i(TAG, ">>> CLOSED gen=" + gen + " code=" + code);
+                    wsConnecting.set(false);
                     wsConnected.set(false);
                     updateKeepAlive("连接关闭(" + code + ")");
                 }
             });
         } catch (Exception e) {
+            wsConnecting.set(false);
             Log.e(TAG, "connect error: " + e.getMessage());
             reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
         }
@@ -1367,8 +1520,8 @@ public class AionPushService extends Service {
                         if ("assistant".equals(role)) {
                             String c = data.optString("content", "");
                             if (c.length() > 100) c = c.substring(0, 100) + "...";
-                            String sender = data.optString("sender", "Aion");
-                            if (sender.isEmpty()) sender = "Aion";
+                            String sender = data.optString("sender", "AI");
+                            if (sender.isEmpty()) sender = "AI";
                             else sender = sender.substring(0, 1).toUpperCase() + sender.substring(1);
                             showNotif(CH_ALARM, "💬 " + sender, c, true);
                         }
@@ -1476,6 +1629,9 @@ public class AionPushService extends Service {
                             + "; savedName=" + rp.getString("device_name", "")
                             + "; savedAddress=" + rp.getString("device_address", "")
                             + "; lastUploadedMs=" + rp.getLong("bg_last_heart_measured_at", 0)
+                            + "; bgFailCount=" + rp.getInt("bg_sync_fail_count", 0)
+                            + "; nextAttemptAtMs=" + rp.getLong("bg_next_sync_attempt_at", 0)
+                            + "; lastFailure=" + rp.getString("bg_last_sync_failure", "")
                             + "; wsConnected=" + wsConnected.get()
                             + "; foreground=" + isForegroundActive;
                     Log.i(TAG, "💍 DIAG: " + info);
@@ -1486,6 +1642,27 @@ public class AionPushService extends Service {
         } catch (Exception e) {
             Log.w(TAG, "parse error: " + e.getMessage());
         }
+    }
+
+    private boolean isCloudflareServer() {
+        if (serverUrl == null) return false;
+        try {
+            return ConnectionEndpoint.isCloudflareHost(new java.net.URI(serverUrl).getHost());
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private String getCloudflareCookie() {
+        try {
+            String cookie = CookieManager.getInstance()
+                    .getCookie(ConnectionEndpoint.CLOUDFLARE_COOKIE_URL);
+            if (ConnectionEndpoint.hasCloudflareAccessCookie(cookie)) return cookie;
+        } catch (Exception e) {
+            Log.w(TAG, "Unable to read Cloudflare Access session: "
+                    + e.getClass().getSimpleName());
+        }
+        return null;
     }
 
     private boolean hasBluetoothPermissionsForRing() {
@@ -1978,13 +2155,14 @@ public class AionPushService extends Service {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
         NotificationManager nm = getSystemService(NotificationManager.class);
         if (nm == null) return;
+        String appName = getString(R.string.app_name);
 
-        NotificationChannel c1 = new NotificationChannel(CH_KEEPALIVE, "Aion Oloth 保活",
+        NotificationChannel c1 = new NotificationChannel(CH_KEEPALIVE, appName + " 保活",
                 NotificationManager.IMPORTANCE_LOW);
         c1.setShowBadge(false);
         nm.createNotificationChannel(c1);
 
-        NotificationChannel c2 = new NotificationChannel(CH_MESSAGE, "Aion Oloth 消息",
+        NotificationChannel c2 = new NotificationChannel(CH_MESSAGE, appName + " 消息",
                 NotificationManager.IMPORTANCE_DEFAULT);
         nm.createNotificationChannel(c2);
 
@@ -2002,7 +2180,7 @@ public class AionPushService extends Service {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new NotificationCompat.Builder(this, CH_KEEPALIVE)
                 .setSmallIcon(R.mipmap.ic_launcher)
-                .setContentTitle("Aion Oloth")
+                .setContentTitle(getString(R.string.app_name))
                 .setContentText(text)
                 .setContentIntent(pi)
                 .setOngoing(true)

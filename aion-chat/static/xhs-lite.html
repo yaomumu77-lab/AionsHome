@@ -1,0 +1,1099 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>小红书巡游</title>
+<link rel="stylesheet" href="/static/common.css">
+<style>
+:root {
+  --xhs-accent:#ff6b7f;
+  --xhs-accent-2:#ff9860;
+  --xhs-soft:rgba(255,107,127,.10);
+  --xhs-soft-2:rgba(255,152,96,.12);
+  --xhs-line:var(--line, var(--border, #f0e4dd));
+  --xhs-card:var(--card, var(--surface, #fff));
+}
+body.sub-page {
+  display:block;
+  max-width:none;
+  min-height:100dvh;
+  height:auto;
+  overflow:auto;
+  background:
+    radial-gradient(circle at 12% 0%, rgba(255,107,127,.18), transparent 26rem),
+    radial-gradient(circle at 90% 8%, rgba(255,152,96,.15), transparent 22rem),
+    var(--bg);
+}
+.wrap {
+  width:min(1040px, 100%);
+  margin:0 auto;
+  padding:18px 14px 34px;
+}
+.panel {
+  border:1px solid var(--xhs-line);
+  border-radius:22px;
+  background:rgba(255,255,255,.76);
+  padding:16px;
+  margin-bottom:14px;
+  box-shadow:0 14px 36px rgba(140,72,49,.10);
+  backdrop-filter:blur(14px) saturate(1.2);
+  -webkit-backdrop-filter:blur(14px) saturate(1.2);
+}
+.hero {
+  display:grid;
+  grid-template-columns:minmax(0, 1fr) auto;
+  gap:14px;
+  align-items:start;
+  overflow:hidden;
+  position:relative;
+}
+.hero::after {
+  content:"";
+  position:absolute;
+  right:-60px;
+  top:-80px;
+  width:190px;
+  height:190px;
+  border-radius:50%;
+  background:linear-gradient(135deg, rgba(255,107,127,.28), rgba(255,152,96,.20));
+  pointer-events:none;
+}
+.title-row,
+.section-head {
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:12px;
+}
+h1 {
+  font-size:25px;
+  line-height:1.18;
+  margin:0 0 7px;
+  letter-spacing:-.02em;
+}
+h2 {
+  font-size:17px;
+  line-height:1.3;
+  margin:0;
+  color:var(--text);
+}
+.eyebrow {
+  margin:0 0 4px;
+  color:var(--xhs-accent);
+  font-size:12px;
+  font-weight:800;
+  letter-spacing:.08em;
+}
+.hint {
+  color:var(--text3);
+  font-size:12px;
+  line-height:1.6;
+}
+.subtitle {
+  max-width:720px;
+  color:var(--text2);
+  font-size:13px;
+  line-height:1.65;
+}
+.grid {
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(250px,1fr));
+  gap:12px;
+}
+.compact-grid {
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+  gap:10px;
+}
+.row {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+}
+label {
+  display:block;
+  font-size:12px;
+  color:var(--text3);
+  margin:7px 0 4px;
+}
+input,
+textarea,
+select {
+  width:100%;
+  border:1px solid var(--xhs-line);
+  border-radius:13px;
+  background:rgba(255,255,255,.72);
+  color:var(--text);
+  padding:10px 11px;
+  outline:none;
+  font-size:14px;
+  transition:border-color .18s, box-shadow .18s, background .18s;
+}
+input:focus,
+textarea:focus,
+select:focus {
+  border-color:rgba(255,107,127,.72);
+  box-shadow:0 0 0 4px rgba(255,107,127,.12);
+  background:#fff;
+}
+textarea {
+  min-height:72px;
+  resize:vertical;
+  font-family:ui-monospace, SFMono-Regular, Consolas, monospace;
+  line-height:1.55;
+}
+button {
+  border:0;
+  border-radius:999px;
+  background:linear-gradient(135deg, var(--xhs-accent), var(--xhs-accent-2));
+  color:white;
+  padding:9px 14px;
+  font-weight:800;
+  cursor:pointer;
+  box-shadow:0 8px 18px rgba(255,107,127,.20);
+  transition:transform .16s, opacity .16s, box-shadow .16s;
+}
+button:hover:not(:disabled) {
+  transform:translateY(-1px);
+  box-shadow:0 10px 24px rgba(255,107,127,.26);
+}
+button.secondary {
+  background:rgba(125,125,125,.13);
+  color:var(--text);
+  box-shadow:none;
+}
+button.ghost {
+  background:transparent;
+  color:var(--text2);
+  box-shadow:none;
+  border:1px solid var(--xhs-line);
+}
+button.small {
+  padding:7px 11px;
+  font-size:12px;
+}
+button:disabled {
+  opacity:.55;
+  cursor:default;
+  transform:none;
+}
+.quick-glance {
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:10px;
+  margin-top:15px;
+}
+.glance-card {
+  border:1px solid rgba(255,107,127,.18);
+  border-radius:16px;
+  background:linear-gradient(180deg, rgba(255,255,255,.82), rgba(255,244,238,.70));
+  padding:11px 12px;
+  min-width:0;
+}
+.glance-card span {
+  display:block;
+  color:var(--text3);
+  font-size:11px;
+  margin-bottom:3px;
+}
+.glance-card strong {
+  display:block;
+  color:var(--text);
+  font-size:14px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.glance-card.ok strong { color:#248a52; }
+.glance-card.warn strong { color:#b86b00; }
+.glance-card.off strong { color:var(--text3); }
+.daily-panel {
+  background:linear-gradient(135deg, rgba(255,255,255,.84), rgba(255,241,235,.74));
+}
+.toggle-grid {
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(210px,1fr));
+  gap:10px;
+  margin-top:14px;
+}
+.switch-card {
+  position:relative;
+  display:flex;
+  align-items:center;
+  gap:12px;
+  min-height:74px;
+  border:1px solid var(--xhs-line);
+  border-radius:18px;
+  background:rgba(255,255,255,.62);
+  padding:12px;
+  cursor:pointer;
+  margin:0;
+}
+.switch-card input {
+  position:absolute;
+  opacity:0;
+  width:0;
+  height:0;
+}
+.switch-knob {
+  position:relative;
+  width:46px;
+  height:26px;
+  border-radius:999px;
+  background:rgba(125,125,125,.20);
+  flex:0 0 auto;
+  transition:background .18s;
+}
+.switch-knob::after {
+  content:"";
+  position:absolute;
+  left:3px;
+  top:3px;
+  width:20px;
+  height:20px;
+  border-radius:50%;
+  background:#fff;
+  box-shadow:0 2px 8px rgba(0,0,0,.16);
+  transition:transform .18s;
+}
+.switch-card input:checked + .switch-knob {
+  background:linear-gradient(135deg, var(--xhs-accent), var(--xhs-accent-2));
+}
+.switch-card input:checked + .switch-knob::after {
+  transform:translateX(20px);
+}
+.switch-copy strong {
+  display:block;
+  color:var(--text);
+  font-size:14px;
+  margin-bottom:3px;
+}
+.switch-copy span {
+  display:block;
+  color:var(--text3);
+  font-size:12px;
+  line-height:1.45;
+}
+.actor-grid {
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+  gap:12px;
+  margin-top:12px;
+}
+.actor-card {
+  border:1px solid rgba(255,107,127,.18);
+  border-radius:20px;
+  background:rgba(255,255,255,.70);
+  padding:14px;
+}
+.actor-top {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-bottom:10px;
+}
+.actor-name {
+  font-weight:900;
+  color:var(--text);
+  font-size:15px;
+}
+.check {
+  display:flex;
+  align-items:center;
+  gap:7px;
+  margin:0;
+  color:var(--text2);
+  font-size:13px;
+  cursor:pointer;
+}
+.check input {
+  width:16px;
+  height:16px;
+  accent-color:var(--xhs-accent);
+}
+.config-panel {
+  padding:0;
+  overflow:hidden;
+}
+.panel-summary {
+  list-style:none;
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding:16px;
+}
+.panel-summary::-webkit-details-marker {
+  display:none;
+}
+.summary-title {
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+}
+.summary-title strong {
+  font-size:17px;
+  color:var(--text);
+}
+.summary-title span {
+  color:var(--text3);
+  font-size:12px;
+}
+.summary-caret {
+  width:30px;
+  height:30px;
+  display:grid;
+  place-items:center;
+  border-radius:50%;
+  background:var(--xhs-soft);
+  color:var(--xhs-accent);
+  transition:transform .18s;
+}
+details[open] .summary-caret {
+  transform:rotate(90deg);
+}
+.config-body {
+  border-top:1px solid var(--xhs-line);
+  padding:0 16px 16px;
+}
+.mini-note {
+  padding:9px 10px;
+  border-radius:14px;
+  background:var(--xhs-soft);
+  color:var(--text2);
+  font-size:12px;
+  line-height:1.5;
+  margin-top:8px;
+}
+.inline-card {
+  border:1px solid var(--xhs-line);
+  border-radius:16px;
+  background:rgba(255,255,255,.56);
+  padding:12px;
+}
+.followings-box {
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+  max-height:150px;
+  overflow:auto;
+  padding:2px;
+  margin-top:6px;
+}
+.status-card {
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr);
+  gap:12px;
+  border:1px solid var(--xhs-line);
+  border-radius:18px;
+  background:rgba(255,255,255,.68);
+  padding:13px;
+  margin-top:12px;
+}
+.status-icon {
+  width:38px;
+  height:38px;
+  border-radius:15px;
+  display:grid;
+  place-items:center;
+  background:var(--xhs-soft);
+  color:var(--xhs-accent);
+  font-size:19px;
+}
+.status-card.ok .status-icon { background:rgba(36,138,82,.10); color:#248a52; }
+.status-card.warn .status-icon { background:rgba(184,107,0,.12); color:#b86b00; }
+.status-card.error .status-icon { background:rgba(207,34,46,.10); color:var(--danger, #cf222e); }
+.status-card.busy .status-icon { background:rgba(70,120,220,.10); color:#4678dc; }
+.status-title {
+  font-weight:900;
+  color:var(--text);
+  margin-bottom:4px;
+}
+.status-text {
+  color:var(--text2);
+  font-size:13px;
+  line-height:1.55;
+  white-space:pre-wrap;
+  word-break:break-word;
+}
+.meta-row {
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+  margin-top:9px;
+}
+.pill {
+  display:inline-flex;
+  align-items:center;
+  max-width:100%;
+  padding:3px 9px;
+  border-radius:999px;
+  background:rgba(255,107,127,.13);
+  color:#c85667;
+  font-size:12px;
+  line-height:1.35;
+}
+.pill.neutral {
+  background:rgba(125,125,125,.12);
+  color:var(--text2);
+}
+.pill.ok {
+  background:rgba(36,138,82,.12);
+  color:#248a52;
+}
+.pill.warn {
+  background:rgba(184,107,0,.12);
+  color:#a15e00;
+}
+.pill.error {
+  background:rgba(207,34,46,.10);
+  color:var(--danger, #cf222e);
+}
+.raw-details,
+.log-extra {
+  margin-top:10px;
+}
+.raw-details summary,
+.log-extra summary {
+  cursor:pointer;
+  color:var(--text2);
+  font-size:12px;
+  font-weight:800;
+}
+pre {
+  max-height:280px;
+  overflow:auto;
+  padding:11px;
+  margin:8px 0 0;
+  border:1px solid var(--xhs-line);
+  border-radius:14px;
+  background:rgba(80,58,48,.06);
+  color:var(--text2);
+  font-size:12px;
+  line-height:1.45;
+  white-space:pre-wrap;
+  word-break:break-word;
+}
+.log-toolbar {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-top:4px;
+}
+.log-list {
+  display:grid;
+  gap:10px;
+  margin-top:12px;
+}
+.log-item {
+  border:1px solid var(--xhs-line);
+  border-radius:18px;
+  background:rgba(255,255,255,.66);
+  padding:13px;
+}
+.log-item.errorish {
+  border-color:rgba(207,34,46,.18);
+}
+.log-top {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-bottom:9px;
+}
+.log-title {
+  min-width:0;
+  font-weight:900;
+  color:var(--text);
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.log-main {
+  display:grid;
+  gap:6px;
+  color:var(--text2);
+  font-size:13px;
+  line-height:1.5;
+}
+.log-line {
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.log-comment {
+  padding:9px 10px;
+  border-radius:14px;
+  background:rgba(255,107,127,.08);
+  color:var(--text);
+  word-break:break-word;
+}
+.empty-state {
+  border:1px dashed var(--xhs-line);
+  border-radius:18px;
+  padding:20px;
+  text-align:center;
+  color:var(--text3);
+  background:rgba(255,255,255,.42);
+}
+@media (max-width:720px) {
+  .wrap { padding:12px 10px 28px; }
+  .hero { grid-template-columns:1fr; }
+  .quick-glance { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .title-row,
+  .section-head,
+  .log-toolbar {
+    flex-direction:column;
+    align-items:stretch;
+  }
+  .section-head .row,
+  .log-toolbar .row {
+    justify-content:flex-start;
+  }
+}
+</style>
+</head>
+<body class="sub-page">
+<div class="wrap">
+  <section class="panel hero">
+    <div>
+      <p class="eyebrow">XHS LITE</p>
+      <h1>📕 小红书巡游工作台</h1>
+      <div class="subtitle">把日常操作放在上面，Cookie、目标账号和高级参数都收进配置抽屉；运行结果和日志只展示关键摘要，完整返回默认折叠。</div>
+      <div class="quick-glance">
+        <div class="glance-card off" id="glanceEnabled"><span>模块</span><strong>加载中</strong></div>
+        <div class="glance-card off" id="glanceCookie"><span>Cookie</span><strong>加载中</strong></div>
+        <div class="glance-card off" id="glanceTarget"><span>目标账号</span><strong>加载中</strong></div>
+        <div class="glance-card off" id="glanceWrite"><span>写入权限</span><strong>加载中</strong></div>
+      </div>
+    </div>
+    <button class="ghost" onclick="location.href='/'">返回首页</button>
+  </section>
+
+  <section class="panel daily-panel">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">DAILY</p>
+        <h2>日常操作</h2>
+        <div class="hint">常用开关、角色启用和手动测试都在这里；改完开关后点保存即可。</div>
+      </div>
+      <button onclick="saveConfig()">保存当前设置</button>
+    </div>
+
+    <div class="toggle-grid">
+      <label class="switch-card">
+        <input type="checkbox" id="enabledInput">
+        <span class="switch-knob"></span>
+        <span class="switch-copy"><strong>启用模块</strong><span>总开关，关闭后自动和手动巡游都会停止。</span></span>
+      </label>
+      <label class="switch-card">
+        <input type="checkbox" id="autoEnabledInput">
+        <span class="switch-knob"></span>
+        <span class="switch-copy"><strong>闲时自动巡游</strong><span>允许后台在合适时机自动跑小红书任务。</span></span>
+      </label>
+      <label class="switch-card">
+        <input type="checkbox" id="writeInput">
+        <span class="switch-knob"></span>
+        <span class="switch-copy"><strong>真实评论/回复</strong><span>关闭时只会生成草稿和日志，不会发到小红书。</span></span>
+      </label>
+    </div>
+
+    <div class="actor-grid">
+      <article class="actor-card">
+        <div class="actor-top">
+          <div>
+            <div class="actor-name" id="actorPrimaryLabel">主AI</div>
+            <div class="hint">角色巡游开关与手动测试</div>
+          </div>
+          <label class="check"><input type="checkbox" id="actorPrimaryInput"> 启用</label>
+        </div>
+        <button class="secondary" id="runPrimaryBtn" onclick="runOnce('aion')">让主AI跑一次</button>
+      </article>
+      <article class="actor-card">
+        <div class="actor-top">
+          <div>
+            <div class="actor-name" id="actorSecondaryLabel">第二AI</div>
+            <div class="hint">角色巡游开关与手动测试</div>
+          </div>
+          <label class="check"><input type="checkbox" id="actorSecondaryInput"> 启用</label>
+        </div>
+        <button class="secondary" id="runSecondaryBtn" onclick="runOnce('connor')">让第二AI跑一次</button>
+      </article>
+    </div>
+  </section>
+
+  <details class="panel config-panel" id="configDetails">
+    <summary class="panel-summary">
+      <span class="summary-title">
+        <strong>配置抽屉</strong>
+        <span>Cookie、目标账号、行动说明和高级参数都收在这里</span>
+      </span>
+      <span class="summary-caret">›</span>
+    </summary>
+    <div class="config-body">
+      <div class="grid" style="margin-top:14px">
+        <div class="inline-card">
+          <h2>操作账号</h2>
+          <label>Cookie（共享的小红书操作账号）</label>
+          <textarea id="cookieInput" placeholder="a1=...; web_session=...（保存后不会回显原文；留空保存不会覆盖）"></textarea>
+          <div class="mini-note" id="cookieHint">读取中...</div>
+          <div class="hint" id="accountHint" style="margin-top:6px"></div>
+          <div class="row" style="margin-top:10px">
+            <button class="secondary" onclick="checkLogin()">测试登录</button>
+            <label class="check"><input type="checkbox" id="clearCookieInput"> 清空已保存 cookie</label>
+          </div>
+        </div>
+
+        <div class="inline-card">
+          <h2>目标账号</h2>
+          <label>目标账号 user_id（让他们去看这个号的帖子）</label>
+          <input id="targetUserIdInput" autocomplete="off" placeholder="填目标账号 user_id">
+          <div class="row" style="margin-top:8px">
+            <button class="secondary" type="button" onclick="loadFollowings()">从关注列表选择</button>
+          </div>
+          <div class="hint" id="followingsHint" style="margin-top:6px"></div>
+          <div id="followingsBox" class="followings-box"></div>
+          <div class="mini-note" id="targetSummary">还没填写目标账号</div>
+        </div>
+      </div>
+
+      <div class="inline-card" style="margin-top:12px">
+        <h2>行动说明</h2>
+        <label>给角色的长期/本次目标</label>
+        <textarea id="taskInstructionInput" placeholder="例如：看目标账号最新帖子和评论区，合适时回复一条评论。"></textarea>
+      </div>
+
+      <details style="margin-top:12px">
+        <summary>高级参数 / 手动修正</summary>
+        <div class="compact-grid" style="margin-top:10px">
+          <div>
+            <label>目标账号昵称</label>
+            <input id="targetNicknameInput" autocomplete="off" placeholder="可选，用来辅助识别">
+          </div>
+          <div>
+            <label>xsec_token</label>
+            <input id="targetXsecInput" autocomplete="off" placeholder="关注列表选择时可能自动带；没有就留空">
+          </div>
+          <div>
+            <label>防反爬等待秒数</label>
+            <input id="delayInput" type="number" min="5" step="1" value="5">
+          </div>
+          <div>
+            <label>关注列表最多翻页数</label>
+            <input id="followPagesInput" type="number" min="1" max="10" step="1" value="3">
+          </div>
+          <div>
+            <label>塞给模型的评论数上限</label>
+            <input id="maxCommentsInput" type="number" min="5" max="50" step="1" value="20">
+          </div>
+          <div>
+            <label>评论署名模板</label>
+            <input id="signatureInput" value=" ——{actor_name}">
+          </div>
+        </div>
+        <label class="check" style="margin-top:10px"><input type="checkbox" id="followInput"> 没选 user_id 时，优先用关注列表匹配昵称</label>
+      </details>
+
+      <div class="row" style="margin-top:14px">
+        <button onclick="saveConfig()">保存配置</button>
+        <button class="ghost" type="button" onclick="$('configDetails').open = false">收起配置</button>
+      </div>
+    </div>
+  </details>
+
+  <section class="panel">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">STATUS</p>
+        <h2>运行状态</h2>
+      </div>
+      <div class="hint">只显示关键结果；完整 JSON 在下方折叠。</div>
+    </div>
+    <div class="status-card busy" id="statusCard">
+      <div class="status-icon" id="statusIcon">…</div>
+      <div>
+        <div class="status-title" id="statusTitle">加载中</div>
+        <div class="status-text" id="statusText">正在读取小红书配置...</div>
+        <div class="meta-row" id="statusMeta"></div>
+      </div>
+    </div>
+    <details class="raw-details" id="statusRawDetails" hidden>
+      <summary>查看完整返回</summary>
+      <pre id="statusRaw"></pre>
+    </details>
+  </section>
+
+  <section class="panel">
+    <div class="log-toolbar">
+      <div>
+        <p class="eyebrow">LOGS</p>
+        <h2>最近日志</h2>
+        <div class="hint" id="logsHint">只展示最近记录摘要，理由和原始记录已折叠。</div>
+      </div>
+      <div class="row">
+        <button class="secondary small" onclick="loadLogs()">刷新</button>
+        <button class="ghost small" id="moreLogsBtn" onclick="loadMoreLogs()">加载更多</button>
+      </div>
+    </div>
+    <div id="logsBox" class="log-list"></div>
+  </section>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let currentConfig = null;
+let followingUsers = [];
+let currentLogLimit = 12;
+
+async function api(method, url, body) {
+  const opts = { method, headers: {'Content-Type': 'application/json'} };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const res = await fetch(url, opts);
+  const text = await res.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch (err) {
+    return { ok:false, error:'接口返回无法解析：' + text.slice(0, 200) };
+  }
+}
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s == null ? '' : String(s);
+  return d.innerHTML;
+}
+function brief(s, max = 130) {
+  const text = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  return text.length > max ? text.slice(0, max - 1) + '…' : text;
+}
+function pill(text, cls = 'neutral') {
+  return text ? '<span class="pill ' + cls + '">' + esc(text) + '</span>' : '';
+}
+function statusName(status) {
+  return {
+    observed:'只观察',
+    drafted:'已生成草稿',
+    commented:'已评论',
+    replied:'已回复'
+  }[status] || (status || '完成');
+}
+function statusTone(status, ok = true) {
+  if (!ok) return 'error';
+  if (status === 'drafted' || status === 'observed') return 'warn';
+  if (status === 'commented' || status === 'replied') return 'ok';
+  return 'ok';
+}
+function actorName(actor) {
+  return (currentConfig && currentConfig.actor_labels && currentConfig.actor_labels[actor]) || (actor === 'aion' ? '主AI' : '第二AI');
+}
+function setGlance(id, value, cls) {
+  const el = $(id);
+  if (!el) return;
+  el.className = 'glance-card ' + (cls || 'off');
+  el.querySelector('strong').textContent = value;
+}
+function updateOverview() {
+  if (!currentConfig) return;
+  const hasTarget = !!(currentConfig.target_user_id || currentConfig.target_nickname);
+  setGlance('glanceEnabled', currentConfig.enabled ? '已启用' : '未启用', currentConfig.enabled ? 'ok' : 'off');
+  setGlance('glanceCookie', currentConfig.cookie_configured ? '已保存' : '未配置', currentConfig.cookie_configured ? 'ok' : 'warn');
+  setGlance('glanceTarget', hasTarget ? (currentConfig.target_nickname || currentConfig.target_user_id) : '未填写', hasTarget ? 'ok' : 'warn');
+  setGlance('glanceWrite', currentConfig.allow_write_comments ? '允许真实写入' : '仅草稿/观察', currentConfig.allow_write_comments ? 'warn' : 'off');
+}
+function renderStatus({ title, text, tone = 'ok', icon = '✓', meta = [], raw = '' }) {
+  const card = $('statusCard');
+  card.className = 'status-card ' + tone;
+  $('statusIcon').textContent = icon;
+  $('statusTitle').textContent = title || '完成';
+  $('statusText').textContent = text || '';
+  $('statusMeta').innerHTML = meta.map(m => pill(m.text, m.cls)).join('');
+  $('statusRaw').textContent = raw || '';
+  $('statusRawDetails').hidden = !raw;
+}
+function summarizeObject(value) {
+  const raw = JSON.stringify(value, null, 2);
+  if (value && value.ok === false) {
+    renderStatus({
+      title:'操作失败',
+      text:value.error || '接口返回失败，但没有给出错误详情。',
+      tone:'error',
+      icon:'!',
+      meta:[{text:'失败', cls:'error'}],
+      raw
+    });
+    return;
+  }
+  const result = value && value.result ? value.result : value;
+  if (result && typeof result === 'object') {
+    const target = result.target || {};
+    const note = result.note || {};
+    const decision = result.decision || {};
+    const status = result.status || (value && value.ok ? 'done' : '');
+    const tone = statusTone(status, true);
+    const title = result.actor_name
+      ? result.actor_name + '：' + statusName(status)
+      : '操作完成';
+    const lines = [];
+    if (target.nickname || target.user_id) lines.push('目标：' + (target.nickname || target.user_id));
+    if (note.title || note.note_id) lines.push('帖子：' + (note.title || note.note_id));
+    if (result.comment_text) lines.push('评论：' + brief(result.comment_text, 180));
+    else if (decision.reason || result.error) lines.push('说明：' + brief(decision.reason || result.error, 180));
+    renderStatus({
+      title,
+      text:lines.join('\n') || '操作已完成。',
+      tone,
+      icon:tone === 'ok' ? '✓' : '·',
+      meta:[
+        {text:statusName(status), cls:tone},
+        result.elapsed_seconds ? {text:result.elapsed_seconds + ' 秒', cls:'neutral'} : null,
+        result.write_enabled === false ? {text:'写入关闭', cls:'warn'} : null,
+        result.manual ? {text:'手动测试', cls:'neutral'} : null
+      ].filter(Boolean),
+      raw
+    });
+    return;
+  }
+  renderStatus({ title:'操作完成', text:String(value || ''), raw });
+}
+function setStatus(value, tone) {
+  if (typeof value === 'string') {
+    const isBusy = tone === 'busy' || /中\.\.\.$|中…|正在|读取.*中|加载中|保存中|测试.*中/.test(value);
+    renderStatus({
+      title:isBusy ? '处理中' : '提示',
+      text:value,
+      tone:tone || (isBusy ? 'busy' : 'ok'),
+      icon:isBusy ? '…' : '✓'
+    });
+  } else {
+    summarizeObject(value);
+  }
+}
+function updateTargetSummary() {
+  const uid = $('targetUserIdInput').value.trim();
+  const nick = $('targetNicknameInput').value.trim();
+  $('targetSummary').textContent = (uid || nick)
+    ? ('目标账号：' + (nick || '未填昵称') + (uid ? ' / user_id: ' + uid : ''))
+    : '还没填写目标账号：这里填目标账号 user_id；昵称可在高级里选填';
+}
+async function loadConfig() {
+  currentConfig = await api('GET', '/api/xhs-lite/config');
+  $('enabledInput').checked = !!currentConfig.enabled;
+  $('autoEnabledInput').checked = !!currentConfig.auto_enabled;
+  $('writeInput').checked = !!currentConfig.allow_write_comments;
+  $('followInput').checked = currentConfig.use_following_list !== false;
+  $('targetUserIdInput').value = currentConfig.target_user_id || '';
+  $('targetNicknameInput').value = currentConfig.target_nickname || '';
+  $('targetXsecInput').value = currentConfig.target_xsec_token || '';
+  updateTargetSummary();
+  $('taskInstructionInput').value = currentConfig.task_instruction || '';
+  $('delayInput').value = currentConfig.write_delay_seconds || 5;
+  $('followPagesInput').value = currentConfig.max_following_pages || 3;
+  $('maxCommentsInput').value = currentConfig.max_comments_for_prompt || 20;
+  $('signatureInput').value = currentConfig.comment_signature_template || ' ——{actor_name}';
+  $('actorPrimaryInput').checked = !currentConfig.actors || !currentConfig.actors.aion || currentConfig.actors.aion.enabled !== false;
+  $('actorSecondaryInput').checked = !currentConfig.actors || !currentConfig.actors.connor || currentConfig.actors.connor.enabled !== false;
+  $('actorPrimaryLabel').textContent = actorName('aion');
+  $('actorSecondaryLabel').textContent = actorName('connor');
+  $('runPrimaryBtn').textContent = '让' + actorName('aion') + '跑一次';
+  $('runSecondaryBtn').textContent = '让' + actorName('connor') + '跑一次';
+  $('cookieHint').textContent = currentConfig.cookie_configured ? ('已保存：' + currentConfig.cookie_masked) : '尚未保存 cookie';
+  const accountBits = [];
+  if (currentConfig.logged_in_nickname) accountBits.push('昵称：' + currentConfig.logged_in_nickname);
+  if (currentConfig.logged_in_user_id) accountBits.push('user_id：' + currentConfig.logged_in_user_id);
+  if (currentConfig.logged_in_red_id) accountBits.push('red_id：' + currentConfig.logged_in_red_id);
+  let accountText = accountBits.length ? ('操作账号（cookie 对应账号）：' + accountBits.join('，')) : '测试登录成功后会显示操作账号昵称和 ID';
+  if (!currentConfig.target_user_id && !currentConfig.target_nickname) accountText += '。目标账号还没填：请在右侧填写。';
+  $('accountHint').textContent = accountText;
+  $('configDetails').open = !(currentConfig.cookie_configured && (currentConfig.target_user_id || currentConfig.target_nickname));
+  updateOverview();
+  setStatus('设置已加载。');
+}
+async function loadFollowings() {
+  $('followingsHint').textContent = '读取关注列表中...';
+  $('followingsBox').innerHTML = '';
+  setStatus('读取关注列表中...', 'busy');
+  const res = await api('GET', '/api/xhs-lite/followings');
+  if (!res.ok) {
+    $('followingsHint').textContent = '读取失败：' + (res.error || '未知错误');
+    setStatus(res);
+    return;
+  }
+  followingUsers = Array.isArray(res.users) ? res.users : [];
+  $('followingsHint').textContent = followingUsers.length ? ('找到 ' + followingUsers.length + ' 个关注账号，点击其中一个设为目标。') : '关注列表为空或接口没有返回账号。';
+  $('followingsBox').innerHTML = followingUsers.map((u, idx) => {
+    const label = esc((u.nickname || '未命名账号') + ' / user_id: ' + (u.user_id || '') + (u.red_id ? ' / red_id: ' + u.red_id : ''));
+    return '<button class="secondary small" type="button" onclick="selectFollowing(' + idx + ')">' + label + '</button>';
+  }).join('');
+  setStatus('关注列表读取完成：' + followingUsers.length + ' 个账号。');
+}
+function selectFollowing(index) {
+  const user = followingUsers[index];
+  if (!user) return;
+  $('targetUserIdInput').value = user.user_id || '';
+  $('targetNicknameInput').value = user.nickname || '';
+  $('targetXsecInput').value = user.xsec_token || $('targetXsecInput').value;
+  updateTargetSummary();
+  setStatus('已选择目标账号：' + (user.nickname || user.user_id || '') + '。记得点“保存配置”。');
+}
+function collectPayload() {
+  const cookie = $('cookieInput').value.trim();
+  const payload = {
+    enabled: $('enabledInput').checked,
+    auto_enabled: $('autoEnabledInput').checked,
+    allow_write_comments: $('writeInput').checked,
+    use_following_list: $('followInput').checked,
+    clear_cookie: $('clearCookieInput').checked,
+    target_user_id: $('targetUserIdInput').value.trim(),
+    target_nickname: $('targetNicknameInput').value.trim(),
+    target_xsec_token: $('targetXsecInput').value.trim(),
+    task_instruction: $('taskInstructionInput').value.trim(),
+    write_delay_seconds: parseFloat($('delayInput').value || '5'),
+    max_following_pages: parseInt($('followPagesInput').value || '3', 10),
+    max_comments_for_prompt: parseInt($('maxCommentsInput').value || '20', 10),
+    comment_signature_template: $('signatureInput').value || ' ——{actor_name}',
+    actors: {
+      aion: { enabled: $('actorPrimaryInput').checked },
+      connor: { enabled: $('actorSecondaryInput').checked }
+    }
+  };
+  if (cookie) payload.cookie = cookie;
+  return payload;
+}
+async function saveConfig() {
+  const payload = collectPayload();
+  setStatus('保存中...', 'busy');
+  const savedRaw = await api('PUT', '/api/xhs-lite/config', payload);
+  if (savedRaw.ok === false) {
+    setStatus(savedRaw);
+    return;
+  }
+  const saved = savedRaw.config || savedRaw;
+  const savedTarget = String(saved.target_user_id || '').trim();
+  const savedInstruction = String(saved.task_instruction || '').trim();
+  const wantedTarget = String(payload.target_user_id || '').trim();
+  const wantedInstruction = String(payload.task_instruction || '').trim();
+  if ((wantedTarget && savedTarget !== wantedTarget) || (wantedInstruction && savedInstruction !== wantedInstruction)) {
+    $('targetUserIdInput').value = wantedTarget;
+    $('targetNicknameInput').value = payload.target_nickname || '';
+    $('targetXsecInput').value = payload.target_xsec_token || '';
+    $('taskInstructionInput').value = wantedInstruction;
+    updateTargetSummary();
+    renderStatus({
+      title:'保存没有生效',
+      text:'后端回读到的目标账号/行动说明和你刚填的不一致。请重启后端后再点保存；当前页面已保留你输入的内容。',
+      tone:'error',
+      icon:'!',
+      raw:JSON.stringify(saved, null, 2)
+    });
+    return;
+  }
+  currentConfig = saved;
+  $('cookieInput').value = '';
+  $('clearCookieInput').checked = false;
+  await loadConfig();
+  setStatus('保存完成。页面不会回显完整 cookie；如果概览显示“已保存”，说明 cookie 仍在配置里。');
+}
+async function checkLogin() {
+  setStatus('测试登录中...', 'busy');
+  const res = await api('POST', '/api/xhs-lite/check-login');
+  if (res.ok && res.account) {
+    await loadConfig();
+    renderStatus({
+      title:'操作账号连接成功',
+      text:'昵称：' + (res.account.nickname || '（未返回）')
+        + '\nuser_id：' + (res.account.user_id || '（未返回）')
+        + '\nred_id：' + (res.account.red_id || '（未返回）'),
+      tone:'ok',
+      icon:'✓',
+      meta:[{text:'登录可用', cls:'ok'}],
+      raw:JSON.stringify(res, null, 2)
+    });
+  } else {
+    setStatus(res);
+  }
+}
+async function runOnce(actor) {
+  setStatus(actorName(actor) + ' 正在巡游小红书...', 'busy');
+  $('runPrimaryBtn').disabled = true;
+  $('runSecondaryBtn').disabled = true;
+  try {
+    const res = await api('POST', '/api/xhs-lite/run-once', { actor: actor });
+    setStatus(res);
+    await loadLogs();
+  } catch (err) {
+    setStatus({ ok:false, error:err.message || String(err) });
+  } finally {
+    $('runPrimaryBtn').disabled = false;
+    $('runSecondaryBtn').disabled = false;
+  }
+}
+function fmtTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  return (d.getMonth()+1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+}
+function renderLogItem(item) {
+  const target = item.target || {};
+  const note = item.note || {};
+  const decision = item.decision || {};
+  const status = item.status || '';
+  const tone = statusTone(status, !item.error || status === 'drafted');
+  const title = (item.actor_name || item.actor || '角色') + '：' + statusName(status);
+  const targetText = target.nickname || target.user_id || '未记录目标';
+  const noteText = note.title || note.note_id || '未记录帖子';
+  const commentText = item.comment_text || (status === 'observed' ? '本次只观察，没有评论。' : '（无评论内容）');
+  const reasonText = decision.reason || item.error || '';
+  const raw = esc(JSON.stringify(item, null, 2));
+  return '<article class="log-item ' + (tone === 'error' ? 'errorish' : '') + '">'
+    + '<div class="log-top">'
+    + '<div class="log-title">' + esc(title) + '</div>'
+    + '<div class="row">' + pill(fmtTime(item.created_at), 'neutral') + pill(statusName(status), tone) + '</div>'
+    + '</div>'
+    + '<div class="log-main">'
+    + '<div class="log-line">目标：' + esc(targetText) + '</div>'
+    + '<div class="log-line">帖子：' + esc(noteText) + '</div>'
+    + '<div class="log-comment">' + esc(brief(commentText, 170)) + '</div>'
+    + (reasonText ? '<div class="hint">理由：' + esc(brief(reasonText, 120)) + '</div>' : '')
+    + '</div>'
+    + '<details class="log-extra">'
+    + '<summary>展开理由和完整记录</summary>'
+    + (reasonText ? '<div class="mini-note">完整理由：' + esc(reasonText) + '</div>' : '')
+    + '<pre>' + raw + '</pre>'
+    + '</details>'
+    + '</article>';
+}
+async function loadLogs() {
+  const data = await api('GET', '/api/xhs-lite/logs?limit=' + currentLogLimit);
+  const items = Array.isArray(data.items) ? data.items : [];
+  $('logsHint').textContent = items.length
+    ? '正在显示最近 ' + items.length + ' 条记录；摘要之外的冗余字段已折叠。'
+    : '还没有日志，手动跑一次后会出现在这里。';
+  $('logsBox').innerHTML = items.length
+    ? items.map(renderLogItem).join('')
+    : '<div class="empty-state">暂无日志</div>';
+  $('moreLogsBtn').disabled = currentLogLimit >= 100;
+}
+function loadMoreLogs() {
+  currentLogLimit = Math.min(100, currentLogLimit + 20);
+  loadLogs();
+}
+loadConfig().then(loadLogs).catch(err => setStatus({ ok:false, error:'加载失败：' + err.message }));
+$('targetUserIdInput')?.addEventListener('input', updateTargetSummary);
+$('targetNicknameInput')?.addEventListener('input', updateTargetSummary);
+['enabledInput','autoEnabledInput','writeInput','actorPrimaryInput','actorSecondaryInput'].forEach(id => {
+  $(id)?.addEventListener('change', () => {
+    currentConfig = Object.assign({}, currentConfig || {}, {
+      enabled: $('enabledInput').checked,
+      auto_enabled: $('autoEnabledInput').checked,
+      allow_write_comments: $('writeInput').checked
+    });
+    updateOverview();
+  });
+});
+</script>
+</body>
+</html>

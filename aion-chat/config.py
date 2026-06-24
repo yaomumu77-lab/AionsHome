@@ -196,21 +196,103 @@ def sanitize_filename(name):
     return re.sub(r'[\\/:*?"<>|\n\r]', '_', name).strip().rstrip('.')
 
 # ── 模型配置 ─────────────────────────────────────
-MODELS = {
-    "硅基GLM-5.1":      {"provider": "siliconflow", "model": "Pro/zai-org/GLM-5.1", "vision": False},
-    "Kimi-K2.6":      {"provider": "siliconflow", "model": "Pro/moonshotai/Kimi-K2.6", "vision": True},
+CUSTOM_OPENAI_PROVIDER = "custom_openai"
+
+BUILTIN_MODELS = {
+    "硅基GLM-5.2":      {"provider": "siliconflow", "model": "zai-org/GLM-5.2", "vision": False},
+    "硅基Kimi2.7":      {"provider": "siliconflow", "model": "moonshotai/Kimi-K2.7-Code", "vision": True},
+    "硅基DS-v4":      {"provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V4-Pro", "vision": False},
     "Gemini-3.5-flash":  {"provider": "gemini", "model": "gemini-3.5-flash", "vision": True},
     "Gemini-3.1-pro":  {"provider": "gemini", "model": "gemini-3.1-pro-preview", "vision": True},
-    "DS-v4-pro":     {"provider": "aipro", "model": "deepseek-v4-pro", "vision": False},
-    "DS-V4-Flash":     {"provider": "aipro", "model": "deepseek-v4-flash", "vision": False},
     "CLI-3.1pro":       {"provider": "gemini_cli", "model": "gemini-3.1-pro-preview", "vision": True},
     # ChatGPT-auth Codex does not support some Codex-only defaults, so pin a
     # model that works after account switches..
     "Codex":            {"provider": "codex_cli",  "model": "gpt-5.5", "vision": True},
-    "AGY-3.5flash":        {"provider": "antigravity_cli", "model": "Gemini 3.5 Flash (Medium)", "vision": True},
-    "AGY-3.1pro":          {"provider": "antigravity_cli", "model": "Gemini 3.1 Pro (High)", "vision": True},
-    "AGY-Claude-Opus-4.6": {"provider": "antigravity_cli", "model": "Claude Opus 4.6 (Thinking)", "vision": True},
+    # Antigravity uses the local agy OAuth session and its saved default model.
+    # Keep agy itself pinned to "Gemini 3.1 Pro (High)" and avoid --model,
+    # because resolving model labels remotely is less stable than the saved default.
+    "AGY-3.1pro":          {"provider": "antigravity_cli", "model": "", "vision": True},
 }
+
+
+def _clean_text(value) -> str:
+    return str(value or "").strip()
+
+
+def normalize_custom_model_routes(value) -> list[dict]:
+    """把设置页保存的自定义 OpenAI 兼容线路清洗成稳定结构。"""
+    if not isinstance(value, list):
+        return []
+    routes: list[dict] = []
+    seen_route_ids: set[str] = set()
+    seen_model_keys: set[str] = set()
+    for idx, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            continue
+        base_url = _clean_text(item.get("base_url")).rstrip("/")
+        api_key = _clean_text(item.get("api_key"))
+        raw_models = item.get("models")
+        if not base_url or not isinstance(raw_models, list):
+            continue
+        route_id = _clean_text(item.get("id")) or f"custom_route_{idx}"
+        route_id = sanitize_filename(route_id).replace(" ", "_") or f"custom_route_{idx}"
+        while route_id in seen_route_ids:
+            route_id = f"{route_id}_{idx}"
+        seen_route_ids.add(route_id)
+        route_name = _clean_text(item.get("name")) or f"自定义线路 {idx}"
+        models: list[dict] = []
+        for raw_model in raw_models:
+            if isinstance(raw_model, str):
+                model_id = _clean_text(raw_model)
+                model_key = model_id
+                vision = True
+            elif isinstance(raw_model, dict):
+                model_id = _clean_text(raw_model.get("model") or raw_model.get("model_id"))
+                model_key = _clean_text(raw_model.get("key") or raw_model.get("name") or model_id)
+                vision = bool(raw_model.get("vision", True))
+            else:
+                continue
+            if not model_id or not model_key:
+                continue
+            if model_key in BUILTIN_MODELS or model_key in seen_model_keys:
+                continue
+            seen_model_keys.add(model_key)
+            models.append({
+                "key": model_key,
+                "model": model_id,
+                "vision": vision,
+            })
+        if models:
+            routes.append({
+                "id": route_id,
+                "name": route_name,
+                "base_url": base_url,
+                "api_key": api_key,
+                "models": models,
+            })
+    return routes
+
+
+def refresh_custom_models() -> None:
+    """根据 settings.json 里的自定义线路刷新运行时模型列表。"""
+    MODELS.clear()
+    MODELS.update(BUILTIN_MODELS)
+    for route in normalize_custom_model_routes(SETTINGS.get("custom_model_routes")):
+        for item in route.get("models", []):
+            key = item["key"]
+            MODELS[key] = {
+                "provider": CUSTOM_OPENAI_PROVIDER,
+                "model": item["model"],
+                "vision": bool(item.get("vision", True)),
+                "base_url": route["base_url"],
+                "api_key": route.get("api_key", ""),
+                "route_id": route["id"],
+                "route_name": route["name"],
+            }
+
+
+MODELS = {}
+refresh_custom_models()
 
 DEFAULT_MODEL = "Gemini-3.5-flash"
 

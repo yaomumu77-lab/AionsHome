@@ -17,7 +17,7 @@ from memory import (
     _pack_embedding, get_embedding, manual_digest, rebuild_embeddings,
     memory_kind_for_type, memory_kind_label, generate_daily_compression_draft,
     get_latest_daily_compression_review, apply_daily_compression_review,
-    discard_daily_compression_review,
+    discard_daily_compression_review, update_daily_compression_review, _memory_time_payload,
 )
 from ws import manager
 
@@ -35,6 +35,7 @@ class MemoryUpdate(BaseModel):
     keywords: Optional[str] = None
     importance: Optional[float] = None
     unresolved: Optional[int] = None
+    evidence_summary: Optional[str] = None
 
 
 class AnchorReset(BaseModel):
@@ -47,7 +48,11 @@ class MemorySourceSelection(BaseModel):
 
 class DailyCompressionRequest(BaseModel):
     target: str = "main"
-    days: int = 14
+    days: int = 15
+
+
+class DailyCompressionDraftUpdate(BaseModel):
+    payload: dict
 
 
 def _json_list(value):
@@ -181,8 +186,8 @@ async def list_memories():
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "SELECT id, content, type, created_at, source_conv, keywords, importance, "
-            "source_start_ts, source_end_ts, unresolved, source_msg_id "
-            "FROM memories ORDER BY created_at DESC"
+            "source_start_ts, source_end_ts, unresolved, source_msg_id, evidence_summary, evidence_detail_level "
+            "FROM memories ORDER BY COALESCE(source_end_ts, source_start_ts, created_at) DESC"
         )
         rows = await cur.fetchall()
         result = []
@@ -190,8 +195,9 @@ async def list_memories():
             item = dict(row)
             item["memory_kind"] = memory_kind_for_type(item.get("type"))
             item["memory_kind_label"] = memory_kind_label(item.get("type"))
+            item.update(_memory_time_payload(item))
             explicit_source = bool(str(item.get("source_msg_id") or "").strip())
-            source_ids = _source_ids_for_memory(row)
+            source_ids = _source_ids_for_memory(item)
             if explicit_source:
                 item["source_count"] = len(source_ids)
             elif item.get("source_start_ts") and item.get("source_end_ts"):
@@ -221,9 +227,9 @@ async def create_memory(body: MemoryCreate):
     now = time.time()
     async with get_db() as db:
         await db.execute(
-            "INSERT INTO memories (id, content, type, created_at, source_conv, embedding, keywords, importance, source_start_ts, source_end_ts) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (mem_id, body.content, body.type, now, None, _pack_embedding(vec) if vec else None, "", 0.5, None, None),
+            "INSERT INTO memories (id, content, type, created_at, source_conv, embedding, keywords, importance, source_start_ts, source_end_ts, evidence_summary, evidence_detail_level) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (mem_id, body.content, body.type, now, None, _pack_embedding(vec) if vec else None, "", 0.5, None, None, "", "summary"),
         )
         await db.commit()
     mem = {
@@ -236,9 +242,12 @@ async def create_memory(body: MemoryCreate):
         "source_start_ts": None,
         "source_end_ts": None,
         "source_msg_id": None,
+        "evidence_summary": "",
+        "evidence_detail_level": "summary",
         "memory_kind": memory_kind_for_type(body.type),
         "memory_kind_label": memory_kind_label(body.type),
     }
+    mem.update(_memory_time_payload(mem))
     await manager.broadcast({"type": "memory_added", "data": mem})
     return mem
 
@@ -261,6 +270,9 @@ async def update_memory(mem_id: str, body: MemoryUpdate):
         if body.unresolved is not None:
             fields.append("unresolved=?")
             params.append(1 if body.unresolved else 0)
+        if body.evidence_summary is not None:
+            fields.append("evidence_summary=?")
+            params.append(str(body.evidence_summary or "").strip())
         params.append(mem_id)
         await db.execute(f"UPDATE memories SET {', '.join(fields)} WHERE id=?", params)
         await db.commit()
@@ -321,6 +333,11 @@ async def latest_daily_compression_review(target: str = "main"):
 @router.post("/api/memories/compress-daily/{review_id}/apply")
 async def apply_daily_compression(review_id: str):
     return await apply_daily_compression_review(review_id)
+
+
+@router.patch("/api/memories/compress-daily/{review_id}")
+async def update_daily_compression(review_id: str, body: DailyCompressionDraftUpdate):
+    return await update_daily_compression_review(review_id, body.payload)
 
 
 @router.post("/api/memories/compress-daily/{review_id}/discard")
@@ -416,6 +433,7 @@ async def get_memory_source(mem_id: str):
         existing = {m["id"] for m in all_msgs}
         extra = await _fetch_source_rows_by_ids(list(selected_ids - existing), user_name, ai_name)
         all_msgs.extend([m for m in extra if m["id"] not in existing])
+        all_msgs = [m for m in all_msgs if m["id"] in selected_ids]
 
     exact_mode = bool(selected_ids)
     keywords = _keyword_list(mem["keywords"])
@@ -515,4 +533,5 @@ async def save_memory_source_selection(mem_id: str, body: MemorySourceSelection)
         "source_start_ts": source_start,
         "source_end_ts": source_end,
         "selected_count": len(source_ids),
+        **_memory_time_payload({"source_start_ts": source_start, "source_end_ts": source_end}),
     }

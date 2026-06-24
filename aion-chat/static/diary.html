@@ -276,7 +276,7 @@ body[data-theme="light"] .diary-input {
 <body data-theme="dark">
 <div class="sub-page">
   <div class="top-bar" style="position:relative">
-    <button class="back-btn" onclick="location.href='/'">⬅</button>
+    <button class="back-btn" onclick="navigateSubPageBack()">⬅</button>
     <h2>📔 日记本</h2>
     <button class="diary-add-btn" onclick="openDiaryModal()" title="写日记">＋</button>
   </div>
@@ -305,7 +305,7 @@ body[data-theme="light"] .diary-input {
   </div>
 </div>
 <script src="/static/theme.js?v=theme-20260606"></script>
-<script src="/static/common.js"></script>
+<script src="/static/common.js?v=diary-back-20260621"></script>
 <script>
 const DIARY_THEME_KEY = 'aion_chat_theme';
 function applyDiaryTheme(theme) {

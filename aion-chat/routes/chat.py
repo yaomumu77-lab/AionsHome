@@ -16,7 +16,7 @@ from config import DEFAULT_MODEL, load_worldbook, SETTINGS, UPLOADS_DIR, CODEX_U
 from database import get_db
 from ws import manager
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
-from memory import recall_memories, instant_digest, fetch_source_details, build_surfacing_memories, get_embedding, _pack_embedding
+from memory import recall_memories, instant_digest, fetch_source_details, build_surfacing_memories, get_embedding, _pack_embedding, _memory_line_with_evidence
 from camera import cam, CAM_CHECK_CMD, perform_cam_check
 from activity import is_activity_tracking_enabled, get_activity_summary_for_prompt, get_user_dynamics_for_prompt
 from routes.files import export_conversation
@@ -44,10 +44,13 @@ THEATER_ITEM_PATTERN = re.compile(r'\[剧场道具[：:]([^\]]+)\]')
 _SYSTEM_MSG_CONTEXT_KEYWORDS = ('查看了监控', '搜索了', '点歌', '点了一首', '推荐了', '查看了动态', '视频通话')
 from context_builder import (
     fetch_merged_timeline, render_merged_timeline, build_health_summary,
-    format_ability_block, WISH_CMD_PATTERN, _build_recall_query,
+    format_ability_block, WISH_CMD_PATTERN, _build_recall_query, strip_tool_commands,
 )
 from music import search_songs, get_audio_url
-from schedule import process_schedule_commands, get_active_schedules, build_schedule_prompt
+from schedule import (
+    ALARM_CMD, MONITOR_CMD, REMINDER_CMD, SCHEDULE_DEL_CMD, SCHEDULE_LIST_CMD,
+    process_schedule_commands, get_active_schedules, build_schedule_prompt,
+)
 from mcp_client import mcp_manager
 from luckin import (
     LuckinOrderError,
@@ -107,6 +110,9 @@ TOY_CMD_PATTERN = re.compile(r'\[TOY:(\d|STOP)\]')
 PET_CMD_PATTERN = re.compile(r'\[PET:([a-z_\-]+)\]', re.IGNORECASE)
 HOME_CMD_PATTERN = re.compile(r'\[HOME:([^\]]+)\]', re.IGNORECASE)
 META_TAG_PATTERN = re.compile(r'\s*<meta>.*?</meta>', re.DOTALL)
+ORPHAN_HOME_ARGS_PATTERN = re.compile(
+    r'(?im)^\s*[^\n\[]+\|(?:mode|hvac_mode|temperature|temp|fan_mode|fan|swing_mode|swing)\s*=[^\n\]]*\]?\s*$'
+)
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 _MD_IMAGE_PATTERN = re.compile(r'!\[[^\]]*\]\(([^)]+)\)')
 _MD_LINK_PATTERN = re.compile(r'(?<!!)\[[^\]]+\]\(([^)]+)\)')
@@ -124,6 +130,29 @@ HOME_ABILITY_TEXT = (
     "[HOME:on/off/state|别名] 或 [HOME:climate|别名|mode=cool|temperature=26] "
     f"控制智能家居，仅限明确要求。别名：{HOME_ALIASES_HINT}。"
 )
+
+
+def _visible_ai_text(text: str) -> str:
+    """Clean local tool protocol tags from text that is shown/saved as a chat reply."""
+    if not text:
+        return ""
+
+    transfers: list[str] = []
+
+    def _hold_transfer(match: re.Match) -> str:
+        transfers.append(match.group(0))
+        return f"__AION_TRANSFER_{len(transfers) - 1}__"
+
+    cleaned = TRANSFER_CMD_PATTERN.sub(_hold_transfer, text)
+    cleaned = strip_tool_commands(cleaned)
+    for pat in (ALARM_CMD, REMINDER_CMD, MONITOR_CMD, SCHEDULE_DEL_CMD, SCHEDULE_LIST_CMD):
+        cleaned = pat.sub("", cleaned)
+    cleaned = ORPHAN_HOME_ARGS_PATTERN.sub("", cleaned)
+    cleaned = META_TAG_PATTERN.sub("", cleaned).strip()
+
+    for idx, transfer in enumerate(transfers):
+        cleaned = cleaned.replace(f"__AION_TRANSFER_{idx}__", transfer)
+    return cleaned.strip()
 
 
 def _parse_home_args(parts: list[str]) -> dict[str, str]:
@@ -949,8 +978,8 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
     if health_text:
         bg_block += health_text
     if surfaced:
-        unresolved_lines = [f"📌 {m['content']}（还没做/还没去）" for m in surfaced if m.get("unresolved")]
-        normal_lines = [f"- {m['content']}" for m in surfaced if not m.get("unresolved")]
+        unresolved_lines = [f"📌 {_memory_line_with_evidence(m)[2:]}（还没做/还没去）" for m in surfaced if m.get("unresolved")]
+        normal_lines = [_memory_line_with_evidence(m) for m in surfaced if not m.get("unresolved")]
         mem_text = "\n".join(unresolved_lines + normal_lines)
         bg_block += f"\n\n[背景记忆]\n以下是你记得的近期事件和需要关注的事项，在对话中如果有关联可以自然提起：\n{mem_text}"
     history.insert(cap_idx + inject_offset, {"role": "user", "content": bg_block})
@@ -969,10 +998,10 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                         "vec_sim": m.get("vec_sim"), "kw_score": m.get("kw_score"),
                         "importance": m.get("importance")} for m in debug_top6] if debug_top6 else []
     if recalled:
-        mem_lines = "\n".join([f"- {m['content']}" for m in recalled])
+        mem_lines = "\n".join([_memory_line_with_evidence(m) for m in recalled])
         mem_block = f"[相关记忆]\n你脑海中与当前话题相关的记忆：\n{mem_lines}"
         if detail_text:
-            mem_block += f"\n\n[原文细节]\n以下是相关的具体对话记录：\n{detail_text}"
+            mem_block += f"\n\n[记忆来源原文]\n以下是相关记忆挂载的来源原文；旧记忆没有精确来源时才会按时间范围回退筛选原文：\n{detail_text}"
         history.insert(cap_idx + inject_offset, {"role": "user", "content": mem_block})
         history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "收到，我会自然地参考这些记忆。"})
 
@@ -1004,7 +1033,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                         continue
                     full_text += chunk
                     if _provider == "antigravity_cli":
-                        await _q.put({"type": "replace", "content": full_text})
+                        await _q.put({"type": "replace", "content": _visible_ai_text(full_text)})
                     else:
                         await _q.put({"type": "chunk", "content": chunk})
                     if tts_streamer:
@@ -1143,7 +1172,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 source_ref=f"{conv_id}:{ai_msg_id}",
             )
 
-            full_text = META_TAG_PATTERN.sub("", full_text).strip()
+            full_text = _visible_ai_text(full_text)
 
             # 检测 [转账：N元] 指令 — AI 转账入账（不从 full_text 中剥离，前端渲染卡片需要）
             transfer_matches = TRANSFER_CMD_PATTERN.findall(full_text)
@@ -1174,13 +1203,13 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
             now2 = time.time()
             async with get_db() as db2:
                 await db2.execute(
-                    "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
-                    (ai_msg_id, conv_id, "assistant", full_text, now2, att_json)
+                    "INSERT INTO messages (id, conv_id, role, content, created_at, attachments, reasoning_content) VALUES (?,?,?,?,?,?,?)",
+                    (ai_msg_id, conv_id, "assistant", full_text, now2, att_json, usage_meta.get("reasoning_content", "").strip())
                 )
                 await db2.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now2, conv_id))
                 await db2.commit()
 
-            ai_msg = {"id": ai_msg_id, "conv_id": conv_id, "role": "assistant", "content": full_text, "created_at": now2, "attachments": reply_atts}
+            ai_msg = {"id": ai_msg_id, "conv_id": conv_id, "role": "assistant", "content": full_text, "created_at": now2, "attachments": reply_atts, "reasoning_content": usage_meta.get("reasoning_content", "").strip()}
             await manager.broadcast({"type": "msg_created", "data": ai_msg})
             await export_conversation(conv_id)
 
@@ -1531,8 +1560,8 @@ async def send_message(conv_id: str, body: MsgCreate):
         if health_text:
             bg_block += health_text
         if surfaced:
-            unresolved_lines = [f"📌 {m['content']}（还没做/还没去）" for m in surfaced if m.get("unresolved")]
-            normal_lines = [f"- {m['content']}" for m in surfaced if not m.get("unresolved")]
+            unresolved_lines = [f"📌 {_memory_line_with_evidence(m)[2:]}（还没做/还没去）" for m in surfaced if m.get("unresolved")]
+            normal_lines = [_memory_line_with_evidence(m) for m in surfaced if not m.get("unresolved")]
             mem_text = "\n".join(unresolved_lines + normal_lines)
             bg_block += f"\n\n[背景记忆]\n以下是你记得的近期事件和需要关注的事项，在对话中如果有关联可以自然提起：\n{mem_text}"
         history.insert(cap_idx + inject_offset, {"role": "user", "content": bg_block})
@@ -1542,7 +1571,7 @@ async def send_message(conv_id: str, body: MsgCreate):
         # 4. RAG 精确召回（与背景记忆去重，使用已并行获取的结果）
         if is_search_needed and recall_query:
             recalled = [r for r in debug_top6 if r["score"] >= 0.45 and r["id"] not in surfaced_ids][:5]
-            # 如果需要追溯原文细节
+            # 如果需要补充记忆证据
             if digest_result.get("require_detail") and recalled:
                 detail_text = await fetch_source_details(recalled, recall_keywords)
 
@@ -1554,10 +1583,10 @@ async def send_message(conv_id: str, body: MsgCreate):
                             "importance": m.get("importance")} for m in debug_top6] if debug_top6 else []
         # 5. 注入向量匹配到的相关记忆（在背景记忆之后，每次请求都可能不同）
         if recalled:
-            mem_lines = "\n".join([f"- {m['content']}" for m in recalled])
+            mem_lines = "\n".join([_memory_line_with_evidence(m) for m in recalled])
             mem_block = f"[相关记忆]\n你脑海中与当前话题相关的记忆：\n{mem_lines}"
             if detail_text:
-                mem_block += f"\n\n[原文细节]\n以下是相关的具体对话记录：\n{detail_text}"
+                mem_block += f"\n\n[记忆来源原文]\n以下是相关记忆挂载的来源原文；旧记忆没有精确来源时才会按时间范围回退筛选原文：\n{detail_text}"
             history.insert(cap_idx + inject_offset, {"role": "user", "content": mem_block})
             history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "收到，我会自然地参考这些记忆。"})
 
@@ -1593,7 +1622,7 @@ async def send_message(conv_id: str, body: MsgCreate):
                         continue
                     full_text += chunk
                     if _provider == "antigravity_cli":
-                        await _q.put({"type": "replace", "content": full_text})
+                        await _q.put({"type": "replace", "content": _visible_ai_text(full_text)})
                     else:
                         await _q.put({"type": "chunk", "content": chunk})
                     if tts_streamer:
@@ -1805,7 +1834,7 @@ async def send_message(conv_id: str, body: MsgCreate):
                             print(f"[剧场] 道具赠送: {item_name}")
 
             # 清洗 AI 回复中模仿产生的 <meta> 标签
-            full_text = META_TAG_PATTERN.sub("", full_text).strip()
+            full_text = _visible_ai_text(full_text)
 
             # 将音乐点歌信息存入 attachments，刷新后可显示胶囊
             music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
@@ -1816,13 +1845,13 @@ async def send_message(conv_id: str, body: MsgCreate):
             now2 = time.time()
             async with get_db() as db2:
                 await db2.execute(
-                    "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
-                    (ai_msg_id, conv_id, "assistant", full_text, now2, att_json)
+                    "INSERT INTO messages (id, conv_id, role, content, created_at, attachments, reasoning_content) VALUES (?,?,?,?,?,?,?)",
+                    (ai_msg_id, conv_id, "assistant", full_text, now2, att_json, usage_meta.get("reasoning_content", "").strip())
                 )
                 await db2.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now2, conv_id))
                 await db2.commit()
 
-            ai_msg = {"id": ai_msg_id, "conv_id": conv_id, "role": "assistant", "content": full_text, "created_at": now2, "attachments": reply_atts}
+            ai_msg = {"id": ai_msg_id, "conv_id": conv_id, "role": "assistant", "content": full_text, "created_at": now2, "attachments": reply_atts, "reasoning_content": usage_meta.get("reasoning_content", "").strip()}
             await manager.broadcast({"type": "msg_created", "data": ai_msg})
             await export_conversation(conv_id)
 
@@ -2539,8 +2568,8 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         if health_text:
             bg_block += health_text
         if surfaced:
-            unresolved_lines = [f"📌 {m['content']}（还没做/还没去）" for m in surfaced if m.get("unresolved")]
-            normal_lines = [f"- {m['content']}" for m in surfaced if not m.get("unresolved")]
+            unresolved_lines = [f"📌 {_memory_line_with_evidence(m)[2:]}（还没做/还没去）" for m in surfaced if m.get("unresolved")]
+            normal_lines = [_memory_line_with_evidence(m) for m in surfaced if not m.get("unresolved")]
             mem_text = "\n".join(unresolved_lines + normal_lines)
             bg_block += f"\n\n[背景记忆]\n以下是你记得的近期事件和需要关注的事项，在对话中如果有关联可以自然提起：\n{mem_text}"
         history.insert(cap_idx + inject_offset, {"role": "user", "content": bg_block})
@@ -2574,10 +2603,10 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                             "importance": m.get("importance")} for m in debug_top6] if debug_top6 else []
         # 5. 注入相关记忆（在背景记忆之后）
         if recalled:
-            mem_lines = "\n".join([f"- {m['content']}" for m in recalled])
+            mem_lines = "\n".join([_memory_line_with_evidence(m) for m in recalled])
             mem_block = f"[相关记忆]\n你脑海中与当前话题相关的记忆：\n{mem_lines}"
             if detail_text:
-                mem_block += f"\n\n[原文细节]\n以下是相关的具体对话记录：\n{detail_text}"
+                mem_block += f"\n\n[记忆来源原文]\n以下是相关记忆挂载的来源原文；旧记忆没有精确来源时才会按时间范围回退筛选原文：\n{detail_text}"
             history.insert(cap_idx + inject_offset, {"role": "user", "content": mem_block})
             history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "收到，我会自然地参考这些记忆。"})
 
@@ -2611,7 +2640,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                         continue
                     full_text += chunk
                     if _provider == "antigravity_cli":
-                        await _q.put({"type": "replace", "content": full_text})
+                        await _q.put({"type": "replace", "content": _visible_ai_text(full_text)})
                     else:
                         await _q.put({"type": "chunk", "content": chunk})
                     if regen_tts:
@@ -2784,7 +2813,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                     pass
 
             # 清洗 AI 回复中模仿产生的 <meta> 标签
-            full_text = META_TAG_PATTERN.sub("", full_text).strip()
+            full_text = _visible_ai_text(full_text)
 
             # 将音乐点歌信息存入 attachments，刷新后可显示胶囊
             music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
@@ -2795,13 +2824,13 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
             now2 = time.time()
             async with get_db() as db2:
                 await db2.execute(
-                    "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
-                    (ai_msg_id, conv_id, "assistant", full_text, now2, att_json)
+                    "INSERT INTO messages (id, conv_id, role, content, created_at, attachments, reasoning_content) VALUES (?,?,?,?,?,?,?)",
+                    (ai_msg_id, conv_id, "assistant", full_text, now2, att_json, usage_meta.get("reasoning_content", "").strip())
                 )
                 await db2.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now2, conv_id))
                 await db2.commit()
 
-            ai_msg = {"id": ai_msg_id, "conv_id": conv_id, "role": "assistant", "content": full_text, "created_at": now2, "attachments": reply_atts}
+            ai_msg = {"id": ai_msg_id, "conv_id": conv_id, "role": "assistant", "content": full_text, "created_at": now2, "attachments": reply_atts, "reasoning_content": usage_meta.get("reasoning_content", "").strip()}
             await manager.broadcast({"type": "msg_created", "data": ai_msg})
             await export_conversation(conv_id)
 

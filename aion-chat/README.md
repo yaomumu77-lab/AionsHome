@@ -257,20 +257,20 @@
 16. **Debug 条** — 每条 AI 消息下方显示：模型名、输入/输出/总 token、召回记忆数，点击展开详情
 
 ### 向量记忆库（RAG 重构）
-17. **记忆总结（手动 + 自动）** — 手动：用户点击「总结新记忆」按钮触发（无最低条数限制）。自动：每 30 分钟检测，若用户已 30 分钟未对话且未总结消息 ≥ 30 条则自动触发。两者共用同一套逻辑和锚点，不会重复总结。从锚点之后的消息开始，每 30 条一组串行处理（余数 <10 合并到最后一组），使用当前聊天的核心模型（而非 flash-lite）提取结构化记忆（含关键词 + 重要度 0-1 + unresolved 判断），Prompt 注入世界书 AI/用户人设使记忆更具个人视角。每组成功后更新锚点。全部总结完成后，再调用一次核心模型生成私密日记并存入日记本；模型可同时决定是否发布一条朋友圈，不再把总结感慨插入聊天窗口。
-18. **即时哨兵（instant_digest）** — 每次用户发消息时自动调用 flash-lite 分析最近对话，返回结构化 JSON：`{is_search_needed, keywords, require_detail, status, topic}`，决定是否需要搜索记忆、是否需要追溯原文细节，同时提供 topic 用于背景记忆浮现
-19. **向量化存储** — 使用 Gemini `gemini-embedding-001`（3072维）将记忆向量化，存入 SQLite memories 表，每条记忆含 keywords（JSON 关键词数组）、importance（重要度）、source_start_ts/source_end_ts（来源时间范围）、unresolved（是否待办/未完成）
+17. **记忆总结（手动 + 自动）** — 手动：用户点击「总结新记忆」按钮触发（无最低条数限制）。自动：每 30 分钟检测，若用户已 30 分钟未对话且未总结消息 ≥ 30 条则自动触发。两者共用同一套逻辑和锚点，不会重复总结。从锚点之后的消息开始，每 30 条一组串行处理（余数 <10 合并到最后一组），使用当前聊天的核心模型（而非 flash-lite）抽取多条原子记忆：一条记忆只记同一天的一件事，`content` 必须以 `YYYY-MM-DD，` 开头，日期也写入 keywords，确保日期参与 embedding 和关键词召回。Prompt 明确保留具体测试反馈、有趣场景、关系氛围和生活线索，但丢弃普通吃喝睡/一次性状态等流水账；模型必须为每条记忆输出真实 `source_message_ids`，后端把这些 id 写入 `source_msg_id` 挂载来源原文，并用它们派生这条记忆的发生时间。模型成功处理一组后更新锚点，即使该组没有值得写入的新记忆也不会反复总结噪音。全部总结完成后，再调用一次核心模型生成私密日记并存入日记本；模型可同时决定是否发布一条朋友圈，不再把总结感慨插入聊天窗口。
+18. **即时哨兵（instant_digest）** — 每次用户发消息时自动调用 flash-lite 分析最近对话，返回结构化 JSON：`{is_search_needed, keywords, require_detail, status, topic}`，决定是否需要搜索记忆、是否需要补充记忆证据，同时提供 topic 用于背景记忆浮现
+19. **向量化存储** — 使用 Gemini `gemini-embedding-001`（3072维）将记忆向量化，存入 SQLite memories 表，每条记忆含 keywords（JSON 关键词数组）、importance（重要度）、source_start_ts/source_end_ts（来源发生时间范围）、source_msg_id（挂载原文 id）、unresolved（是否待办/未完成）。API 和 prompt 注入会派生 `memory_time/memory_time_label`，优先展示“发生”时间；无 source 时间时才显示“记录”时间。`evidence_summary` 仅为旧数据兼容字段，新总结不再依赖它。
 20. **综合评分召回** — `final_score = vec_sim × 0.6 + kw_score × 0.3 + importance × 0.1`，threshold=0.45，Top 5。关键词匹配支持子串模糊命中
-21. **原文追溯（fetch_source_details）** — 当 `require_detail=true` 时，在召回记忆的 source 时间范围内按关键词筛选原始对话记录，去重后按时间排序，拼接注入 prompt
+21. **记忆原文追溯（fetch_source_details）** — 当 `require_detail=true` 时，优先按召回记忆的 `source_msg_id` 注入挂载原文；只有旧记忆没有精确来源 id 时，才按 source 时间范围和关键词回退筛选原始对话记录。
 22. **总结锚点管理** — 锚点持久化在 `data/digest_anchor.json`，UI 显示当前锚点时间 + 日期选择器可回退
-23. **可视化管理** — 侧边栏「🧠 记忆库」按钮，支持搜索/添加/编辑/删除，编辑后自动重新向量化。每条记忆显示关键词标签 + 重要度分数，编辑时可修改关键词和重要度。有 source 时间范围的记忆可点击 📜 查看原文。📌 按钮可切换记忆的“待办/未完成”状态，unresolved 的记忆以橙色高亮显示
+23. **可视化管理** — 侧边栏「🧠 记忆库」按钮，支持搜索/添加/编辑/删除，编辑后自动重新向量化。每条记忆显示关键词标签 + 重要度分数 + 发生时间，编辑时可修改关键词和重要度。有 source 时间范围或精确来源的记忆可点击 📜 查看并重新筛选挂载原文。📌 按钮可切换记忆的“待办/未完成”状态，unresolved 的记忆以橙色高亮显示
 
 ### 语音合成 (TTS) — 服务端流式推送架构
 24. **服务端流式 TTS** — AI 流式输出过程中，后端 `tts.py` 的 `TTSStreamer` 实时按句切分文本（100-200 字，按句号/问号/感叹号/换行等断句），每句异步调用硅基流动 CosyVoice2-0.5B 合成 mp3，合成完成后立即通过 WebSocket 或 SSE 推送 `tts_chunk` 事件给前端，前端收到即可开始播放，无需等待全文生成完毕。SSE 模式通过 `sse_queue` 参数支持，用于小剧场和奥罗斯幽林等独立 SSE 流场景
 25. **多场景触发** — 用户发消息后的 AI 流式回复、重新生成、Core 主动发言（哨兵唤醒/闹铃/定时监控/[CAM_CHECK] 跟进）均自动创建 TTSStreamer 进行流式合成
 26. **音色选择** — 齿轮配置面板内选择硅基流动账号下的自定义音色，通过 WebSocket `tts_state` 消息同步到服务端
 27. **前端队列播放** — 前端维护 `ttsQueue`（Map 结构，key 为 msg_id），每条消息的分片按 seq 顺序播放，多条消息按到达顺序排队；播放完最后一片后服务端广播 `tts_done` 事件，前端清理队列并继续下一条
-28. **多端 TTS 状态同步** — 前端开启 TTS 后通过 WebSocket 发送 `tts_state` 消息（含 enabled/voice/can_play/active_at），服务端 `ConnectionManager` 在 `tts_clients` 字典中跟踪各客户端状态，并将 `tts_chunk`/`tts_done` 定向给最近可播放的客户端；页面进入后台、pagehide/freeze 时前端会撤销播放资格并清空本地 TTS 队列，恢复前台后只接收恢复之后生成的新分片；同时 HTTP POST（send_message/regenerate）的 body 中也携带 `tts_enabled`/`tts_voice` 作为 `_tts_fallback` 回落，确保服务端发起的消息（cam_check/闹铃/监控）也能获取 TTS 状态
+28. **多端 TTS 状态同步** — 前端开启 TTS 后通过 WebSocket 发送 `tts_state` 消息（含 enabled/voice/can_play/active_at），服务端 `ConnectionManager` 在 `tts_clients` 字典中跟踪各客户端状态，并将 `tts_chunk`/`tts_done` 定向给最近真实交互过的可播放客户端；页面进入后台、pagehide/freeze 时不会撤销播放资格或清空队列，手机端接管后最小化/切页仍可继续播放，直到电脑端或其他页面重新交互并刷新 `active_at` 后接管；同时 HTTP POST（send_message/regenerate）的 body 中也携带 `tts_enabled`/`tts_voice` 作为 `_tts_fallback` 回落，确保服务端发起的消息（cam_check/闹铃/监控）也能获取 TTS 状态
 28b. **TTS 音频缓存** — 合成的音频分片存储在 `data/tts_cache/` 目录，文件名为 `{msg_id}_s{seq}.mp3`，前端可通过 `/api/tts/audio/{chunk_name}` 获取；点击 AI 消息的 🔊 图标可重播已缓存的 TTS 分片
 28c. **TTS 重播** — 点击聊天气泡下的喇叭图标，前端通过 HEAD 请求探测 `{msg_id}_s0`、`{msg_id}_s1`... 是否存在，依次播放所有分片；支持 GET 和 HEAD 两种 HTTP 方法
 
@@ -290,12 +290,12 @@
 33. **聊天状态摘要（chat_status）** — 即时哨兵提取，存储在 `data/chat_status.json`，监控哨兵分析时自动注入
 
 ### Core 主动查看监控（[CAM_CHECK]）
-34. **[CAM_CHECK] 指令** — 摄像头开启时，prompt 中注入能力提示，Core 可在回复中输出 `[CAM_CHECK]` 指令主动请求查看监控画面
+34. **[CAM_CHECK] 指令** — prompt 中注入能力提示，Core 可在回复中输出 `[CAM_CHECK]` 指令主动请求查看监控画面；摄像头不可用时会尝试电脑屏幕 + 手机屏幕兜底
 35. **前端实时过滤** — 流式输出时前端实时 strip `[CAM_CHECK]`，用户看不到原始指令
 36. **提示音 + 5秒延迟** — 检测到指令后前端播放 `AionMonitoralart.mp3` 提示音，等待 5 秒给用户反应时间，然后再截图
 37. **加载指示器** — 等待期间在 AI 消息下方显示「📷 {AI名} 正在查看监控 ● ● ●」弹跳动画，5秒后自动移除（renderMessages 重建后自动恢复）
 38. **后台截图+AI分析** — 5秒后前端 POST `/api/cam-check-trigger`，后端截图并调用 Core 模型分析画面，结果作为新 assistant 消息保存并 WebSocket 广播
-39. **摄像头离线处理** — 若摄像头未开启，后端发 `cam_offline` SSE 事件，前端显示「📷 摄像头未开启，Core无法查看监控信息」提示
+39. **画面兜底处理** — 若摄像头未开启或无可用帧，后端改用电脑屏幕/手机屏幕截图；若仍无可用画面，聊天室会写入系统提示而不是静默结束
 40. **两套系统独立** — 哨兵定时监控和 Core 主动查看是完全独立的两套系统，互不影响。关闭哨兵不影响 Core 主动查看，反之亦然
 
 ### Core 主动查看设备动态（[查看动态:n]）
@@ -1054,23 +1054,23 @@
 ```
 
 ### 爱的印记（AI 礼物系统）
-317. **AI 自主送礼** — 每次自动记忆总结完成后，AI 综合判断是否需要给用户送一份礼物。判断依据：今天的聊天是否有特别温馨/感动/有意义的内容、是否是特殊日子（节日/纪念日/生日等）、用户的心情状态。Prompt 注入当前精确时间（年月日星期时分秒）+ 本次总结的所有记忆摘要 + 最近聊天上下文 + 世界书人设，要求 AI 返回结构化 JSON（`givegift` / `image_prompt` / `message`）
+317. **AI 自主送礼** — 每次记忆总结完成后，AI 在生成私密日记的同一次模型调用中，综合判断是否需要给用户送一份礼物，同时也可低概率决定发布朋友圈，不再为送礼判断额外调用一次模型。Prompt 注入当前精确时间（年月日星期时分秒）+ 本次总结的所有记忆摘要 + 最近聊天上下文 + 世界书人设，结构化 JSON 同时返回 `diary`、`post_moment`、`moment`、`givegift` 和 `gift`；仅在 `givegift=true` 时继续生图并入库
 318. **硅基流动 Kolors 生图** — AI 决定送礼后，使用 `image_prompt` 调用硅基流动 `Kwai-Kolors/Kolors` 模型（免费）生成 1024×1024 图片。Prompt 约束为 cute cartoon style、不生成真实人物。图片 URL 1 小时过期，后端立即下载保存到 `data/uploads/gift_{timestamp}.png`
 319. **礼物弹窗动画（全页面）** — 礼物生成后通过 WebSocket 广播 `gift_pending` 事件。前端任何页面（聊天页 chat.html + 所有子页面 common.js）收到后弹出全屏礼物动画。打开聊天页/子页面时也会自动检查 `GET /api/gift/pending` 并弹窗
 320. **礼物盒开启流程** — ① SVG 礼物盒从底部弹跳入场 → ② 用户点击打开 → 播放「打开礼物.mp3」音效 → 盒盖飞走 + 60 个彩色礼花粒子爆炸 → ③ 图片从中心缩放淡入 → ④ 点击图片 → AI 的配图文字滑出 → 「💝 收下礼物」按钮出现 → ⑤ 点击收下 → 整体缩小飞走动画 → POST 标记 received
 321. **爱的印记陈列馆** — `/gift` 页面（`gift.html`），暗色画廊风格，3 列缩略图网格展示所有已收到的礼物（缩略图+日期），点击打开详情弹窗（大图+日期+文字+删除按钮），按时间倒序排列
 322. **礼物数据** — 存储在 SQLite `gifts` 表（id, image_path, message, created_at, status, received_at），status 为 `pending`（未领取）或 `received`（已领取）。删除礼物时同步清理本地图片文件
-323. **不过度送礼** — Prompt 中明确要求 AI「不要每次都送，只在真正值得的时候才送，大部分时候应该返回 false」
+323. **不过度送礼** — 日记 Prompt 中明确要求朋友圈是小概率事件、送礼是更低概率事件，大部分时候应返回 `post_moment=false` 和 `givegift=false`
 324. **测试按钮** — 爱的印记页面右上角「🎁 测试送礼」按钮，取最近 5 条记忆 + 最近 20 条上下文触发完整送礼流程（AI 判断 + 生图 + 入库 + WebSocket 推送）
 325. **主页入口** — home.html APPS 数组增加「爱的印记」（`/public/funIcon_0018_爱的印记.png`）
 
 ### 爱的印记工作流程
 ```
 【触发时机（记忆总结完成后）】
-  _do_digest() 完成记忆总结 + 生成私密日记
-  → 调用 gift.judge_and_send_gift()
-  → 构建判断 Prompt（人设 + 当前时间 + 记忆摘要 + 上下文）
-  → simple_ai_call() 调用核心模型 → 返回 JSON
+  _do_digest() 完成记忆总结
+  → 构建日记 Prompt（人设 + 当前时间 + 记忆摘要 + 上下文）
+  → 同一次模型调用返回日记 + 可选朋友圈 + 可选礼物 JSON
+  → gift.send_gift_from_decision() 执行模型已做出的送礼决定，不再调用模型
   → givegift = false？→ 结束
   → givegift = true？→ 提取 image_prompt + message
 
@@ -1263,12 +1263,14 @@
     recall_memories: 向量相似度×0.6 + 关键词命中率×0.3 + 重要度×0.1
     → Top 5 记忆注入 prompt（自动与背景记忆去重）
     ↓ (如果 require_detail = true 且有召回)
-    fetch_source_details: 在记忆 source 时间范围内按关键词筛选原始对话
-    → 原文细节追加注入 prompt
+    fetch_source_details: 优先读取 source_msg_id 对应的挂载原文，旧记忆无精确来源 id 时才回退范围筛选
+    → 记忆来源原文追加注入 prompt
 
 【记忆总结 _do_digest — 手动点击按钮 / 自动定时触发】
   自动触发条件：每 30 分钟检测，用户已 30 分钟未对话 且 未总结消息 ≥ 30 条
   手动触发：无最低条数限制，共用锚点不会重复总结
+  每组消息 → 核心模型输出 memories[] → 多条原子记忆分别写库
+  每条记忆：content（YYYY-MM-DD 开头的单一事实）+ keywords（含 YYYY-MM-DD）+ source_msg_id（挂载原文 id）+ source_start_ts/source_end_ts（发生时间范围）
   从锚点时间之后取消息 → 每 30 条一组（余数<10合并）→ 串行处理：
     核心模型（当前聊天模型）分析，注入世界书 AI/用户人设 → 输出 JSON:
       {"summary": "...", "keywords": [...], "importance": 0.8, "unresolved": true/false}
@@ -1466,6 +1468,7 @@
 | `music` | 音乐卡片数据广播（SSE + WS 双通道） |
 | `debug` | Debug 数据广播（SSE + WS 双通道，语音发送时也能收到） |
 | `monitor_alert` | 定时监控触发，前端播放提示音，手机端弹高优先级通知 |
+| `chatroom_ai_status` | 聊天室异步后续动作状态，如 [CAM_CHECK] 获取画面、非视觉模型等待哨兵识图 |
 | `phone_screen_uploaded` | Android 手机屏幕截图已上传，供诊断/前端实时感知 |
 | `phone_screen_skipped` | Android 手机屏幕截图跳过，携带 skip_reason/app/locked |
 | `schedule_alarm` | 闹铃到期触发，前端弹出确认弹窗，手机端弹高优先级通知 |
@@ -1525,7 +1528,7 @@
 - **多模态构建**：`build_multimodal_messages()`（硅基流动 base64 URL）和 `build_gemini_contents()`（Gemini inline_data）
 - **Token 用量捕获**：stream_ai 通过 meta dict 在流式过程中捕获 Gemini usageMetadata / 硅基流动 usage
 - **Gemini 轮次交替**：Gemini API 要求 user/model 严格交替，所有系统注入都以 user+assistant 对形式插入
-- **[CAM_CHECK] 流程**：后端在 SSE 中发 `cam_check` 事件 + WebSocket 广播 → 前端播放音频+5秒 setTimeout → POST trigger API → 后端 asyncio.create_task 异步截图+AI分析
+- **[CAM_CHECK] 流程**：后端在 SSE 中发 `cam_check` 事件 + WebSocket 广播 → 前端播放音频+5秒 setTimeout → POST trigger API → 后端 asyncio.create_task 异步截图+AI分析；聊天室异步路径优先取摄像头合成图，失败时回退到电脑屏幕/手机屏幕，并通过 `chatroom_ai_status` 显示非视觉模型的哨兵识图状态
 - **cam_check 加载指示器**：前端用 `camCheckMsgId` 全局变量跟踪，`renderMessages()` 重建 DOM 后自动恢复指示器
 - **语音唤醒架构**：voice.py 运行在独立线程，通过 `asyncio.run_coroutine_threadsafe` 桥接主事件循环；WebRTC VAD (mode=2) 做帧级人声检测（30ms/帧），不需要噪底校准
 - **半双工协调**：`ai_speaking` 标志由服务端 `tts_done` WebSocket 事件驱动（前端收到后调用 `notifyVoiceAiSpeaking(false)`），暂停录音期间持续 `stream.read()` 丢弃数据防止缓冲区溢出；voice.py 的 `_async_send` 在 HTTP POST body 中携带 `tts_enabled`/`tts_voice` 参数
@@ -1543,7 +1546,7 @@
 - **PC 活动采集**：`PCActivityTracker` 守护线程通过 `win32gui.GetForegroundWindow()` + `psutil.Process.name()` 每 60 秒记录前台窗口，通过 `asyncio.run_coroutine_threadsafe()` 桥接主事件循环上报；`PCDisplayTracker` 另起守护线程监听显示器状态。`pywin32` 和 `psutil` 必须安装在项目 `.venv` 中（系统 Python 中的无效）
 - **App 名称解析**：服务端 `KNOWN_APPS` 字典映射 80+ 常见包名/进程名→中文名，`resolve_app_name()` 返回 `None` 表示需过滤的系统应用（桌面、SystemUI 等），读取历史日志时 `_resolve_entries()` 对旧条目重新解析确保名称一致
 - **活动日志清理**：`cleanup_old_activity_logs()` 读取→过滤→重写 JSONL 文件，仅保留 `KEEP_HOURS=8` 小时内的条目，每次上报时顺带执行
-- **TTS 前端播放流程**：前端 `ttsQueue`（Map，key=msg_id）维护各消息的播放队列，`playNextTTSChunk()` 按 seq 顺序取出分片 URL 播放；收到 `tts_done` WebSocket 事件后标记 `q.finished = true`，当最后一片播放完毕且队列标记结束时，调用 `finishTTSForMsg()` 清理并通知语音模块（`notifyVoiceAiSpeaking(false)`）恢复录音；前端在后台/隐藏/pagehide/freeze 时停止 live TTS、清空队列并拒收早于恢复时间的分片，避免手机端恢复后补播白天在电脑端已听过的语音
+- **TTS 前端播放流程**：前端 `ttsQueue`（Map，key=msg_id）维护各消息的播放队列，`playNextTTSChunk()` 按 seq 顺序取出分片 URL 播放；收到 `tts_done` WebSocket 事件后标记 `q.finished = true`，当最后一片播放完毕且队列标记结束时，调用 `finishTTSForMsg()` 清理并通知语音模块（`notifyVoiceAiSpeaking(false)`）恢复录音；前端只在用户关闭 TTS 开关时停止 live TTS 并清空队列，后台/隐藏/pagehide/freeze 只同步当前 lease，不主动停止手机端播放
 - **消息编辑 attachments 修复**：后端 `update_message` 广播前 `json.loads` 解析 attachments，避免前端收到字符串导致渲染崩溃
 - **PWA 架构**：`sw.js` 和 `manifest.json` 物理存放在 `static/` 目录，但通过 `main.py` 的独立路由从根路径 `/sw.js`、`/manifest.json` 提供，确保 Service Worker 作用域覆盖全站
 - **外网访问**：通过 Tailscale 组建虚拟局域网，WireGuard 端到端加密，无需暴露公网端口；代码层面零改动，仅需两端安装 Tailscale 并登录同一账号

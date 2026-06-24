@@ -2,10 +2,31 @@
 礼物系统 API 路由
 """
 
-from fastapi import APIRouter
+import asyncio
+from pathlib import Path
+
+import aiosqlite
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
+from PIL import Image
+
+from config import DATA_DIR, UPLOADS_DIR
+from database import get_db
 from gift import get_pending_gifts, receive_gift, list_gifts, delete_gift
 
 router = APIRouter(prefix="/api/gift", tags=["gift"])
+THUMBNAIL_DIR = DATA_DIR / "gift_thumbnails"
+THUMBNAIL_DIR.mkdir(exist_ok=True)
+
+
+def _build_thumbnail(source: Path, destination: Path):
+    temp = destination.with_suffix(".part.webp")
+    with Image.open(source) as image:
+        image.thumbnail((480, 480), Image.Resampling.LANCZOS)
+        if image.mode not in ("RGB", "RGBA"):
+            image = image.convert("RGB")
+        image.save(temp, "WEBP", quality=76, method=6)
+    temp.replace(destination)
 
 
 @router.get("/pending")
@@ -29,10 +50,37 @@ async def api_list():
     return {"ok": True, "gifts": gifts}
 
 
+@router.get("/thumbnail/{gift_id}")
+async def api_thumbnail(gift_id: str):
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT image_path FROM gifts WHERE id=?", (gift_id,))
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="gift not found")
+
+    source = (UPLOADS_DIR / row["image_path"]).resolve()
+    if UPLOADS_DIR.resolve() not in source.parents or not source.is_file():
+        raise HTTPException(status_code=404, detail="image not found")
+    destination = THUMBNAIL_DIR / f"{gift_id}.webp"
+    if not destination.is_file() or destination.stat().st_mtime_ns < source.stat().st_mtime_ns:
+        await asyncio.to_thread(_build_thumbnail, source, destination)
+    return FileResponse(
+        destination,
+        media_type="image/webp",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
 @router.delete("/{gift_id}")
 async def api_delete(gift_id: str):
     """删除礼物"""
     ok = await delete_gift(gift_id)
+    if ok:
+        try:
+            (THUMBNAIL_DIR / f"{gift_id}.webp").unlink(missing_ok=True)
+        except OSError:
+            pass
     return {"ok": ok}
 
 

@@ -2,13 +2,13 @@
 AI 模型调用：硅基流动 / Gemini 流式 + 多模态消息构建
 """
 
-import json, base64, mimetypes, asyncio, shutil, subprocess, os, re
+import json, base64, mimetypes, asyncio, shutil, subprocess, os, re, time, uuid
 from pathlib import Path
 
 import httpx
 import tempfile
 
-from config import get_key, MODELS, UPLOADS_DIR, CODEX_UPLOADS_DIR, SETTINGS, get_sentinel_config
+from config import get_key, MODELS, UPLOADS_DIR, CODEX_UPLOADS_DIR, SETTINGS, get_sentinel_config, DATA_DIR
 
 # CLI 状态前缀：yield 此前缀的 chunk 会被 _bg_generate 拦截为状态事件，不送入 TTS 和正文
 CLI_STATUS_PREFIX = "\x00CLI_STATUS:"
@@ -18,6 +18,8 @@ _ANTIGRAVITY_TIMEOUT_NOTICE_RE = re.compile(
     r"(?:\r?\n)*Error:\s*timed out waiting for response\s*$",
     re.IGNORECASE,
 )
+MODEL_RAW_RESPONSE_DIR = DATA_DIR / "model_raw_responses"
+MODEL_RAW_RESPONSE_RETENTION_SECONDS = 3 * 24 * 60 * 60
 
 # Gemini CLI 内部思考/工具痕迹清洗：
 # Gemini 3 在 agent 模式下处理图片时，可能把内部思考链（image_description / thought / Footnote / 系统指令）
@@ -70,6 +72,12 @@ def _extract_gemini_cli_report_error(stderr_text: str) -> tuple[str | None, str 
     """从 Gemini CLI 的临时错误报告里提炼核心错误，并保留报告路径。"""
     if not stderr_text:
         return None, None
+    if "UNSUPPORTED_CLIENT" in stderr_text or "IneligibleTierError" in stderr_text:
+        return (
+            "Gemini CLI 的个人免费/Pro/Ultra 通路已被 Google 停止服务，"
+            "当前账号需要改用项目里的 AGY-3.1pro（Antigravity CLI）线路。",
+            None,
+        )
     match = re.search(r"Full report available at:\s*(.+?\.json)", stderr_text)
     if not match:
         return None, None
@@ -311,6 +319,9 @@ async def call_siliconflow(messages: list, model: str, meta: dict | None = None,
                             meta["total_tokens"] = u.get("total_tokens", 0)
                             meta["raw"] = u  # 保留原始 usage 数据
                         delta = chunk["choices"][0].get("delta", {}) if chunk.get("choices") else {}
+                        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                        if meta is not None and reasoning:
+                            meta["reasoning_content"] = meta.get("reasoning_content", "") + str(reasoning)
                         if "content" in delta and delta["content"]:
                             yield delta["content"]
                     except:
@@ -357,15 +368,22 @@ async def call_gemini(messages: list, model: str, meta: dict | None = None, temp
                             meta["completion_tokens"] = u.get("candidatesTokenCount", 0)
                             meta["total_tokens"] = u.get("totalTokenCount", 0)
                             meta["raw"] = u  # 保留原始 usageMetadata 数据
-                        text = chunk.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                        if text:
-                            yield text
+                        parts = chunk.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                        for part in parts:
+                            text = part.get("text", "") if isinstance(part, dict) else ""
+                            if not text:
+                                continue
+                            if part.get("thought"):
+                                if meta is not None:
+                                    meta["reasoning_content"] = meta.get("reasoning_content", "") + text
+                            else:
+                                yield text
                     except:
                         pass
 
-# ── AiPro 中转站 Deepseek ────────────────────────────────────────https://vip.aipro.love
+# ── AiPro 中转站  ────────────────────────────────────────https://vip.aipro.love
 async def call_aipro(messages: list, model: str, meta: dict | None = None, temperature: float | None = None, max_tokens: int | None = None):
-    url = "https://api.deepseek.com/v1/chat/completions"	
+    url = "https://shufulei.net/v1/chat/completions"	
     headers = {"Authorization": f"Bearer {get_key('aipro')}", "Content-Type": "application/json"}
     api_messages = build_multimodal_messages(messages)
     payload = {"model": model, "messages": api_messages, "stream": True}
@@ -397,10 +415,76 @@ async def call_aipro(messages: list, model: str, meta: dict | None = None, tempe
                             meta["total_tokens"] = u.get("total_tokens", 0)
                             meta["raw"] = u
                         delta = chunk["choices"][0].get("delta", {}) if chunk.get("choices") else {}
+                        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                        if meta is not None and reasoning:
+                            meta["reasoning_content"] = meta.get("reasoning_content", "") + str(reasoning)
                         if "content" in delta and delta["content"]:
                             yield delta["content"]
                     except:
                         pass
+
+
+def _openai_chat_completions_url(base_url: str) -> str:
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        return ""
+    if base.endswith("/chat/completions"):
+        return base
+    if base.endswith("/v1"):
+        return f"{base}/chat/completions"
+    return f"{base}/v1/chat/completions"
+
+
+# ── 自定义 OpenAI 兼容中转站 ─────────────────────────
+async def call_custom_openai(messages: list, cfg: dict, meta: dict | None = None, temperature: float | None = None, max_tokens: int | None = None):
+    model = (cfg.get("model") or "").strip()
+    url = _openai_chat_completions_url(cfg.get("base_url", ""))
+    if not url or not model:
+        yield "[自定义中转站错误] 缺少 API 地址或模型名称"
+        return
+    headers = {"Content-Type": "application/json"}
+    api_key = (cfg.get("api_key") or "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    api_messages = build_multimodal_messages(messages)
+    payload = {"model": model, "messages": api_messages, "stream": True}
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    async with httpx.AsyncClient(timeout=120) as client:
+        async with client.stream("POST", url, json=payload, headers=headers) as resp:
+            if resp.status_code != 200:
+                body = await resp.aread()
+                try:
+                    err = json.loads(body).get("error", {}).get("message", body.decode())
+                except:
+                    err = body.decode(errors="replace")[:500]
+                route_name = cfg.get("route_name") or "自定义中转站"
+                yield f"[{route_name}错误 {resp.status_code}] {err}"
+                return
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line.split(":", 1)[1].strip()
+                if data == "[DONE]":
+                    return
+                try:
+                    chunk = json.loads(data)
+                    if meta is not None and chunk.get("usage"):
+                        u = chunk["usage"]
+                        meta["prompt_tokens"] = u.get("prompt_tokens", 0)
+                        meta["completion_tokens"] = u.get("completion_tokens", 0)
+                        meta["total_tokens"] = u.get("total_tokens", 0)
+                        meta["raw"] = u
+                    delta = chunk["choices"][0].get("delta", {}) if chunk.get("choices") else {}
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                    if meta is not None and reasoning:
+                        meta["reasoning_content"] = meta.get("reasoning_content", "") + str(reasoning)
+                    if delta.get("content"):
+                        yield delta["content"]
+                except:
+                    pass
 
 # ── Gemini CLI ────────────────────────────────────
 def _find_gemini_script() -> str | None:
@@ -453,7 +537,7 @@ def _summarize_antigravity_log(log_path: Path | None) -> str:
     if "RESOURCE_EXHAUSTED" in text or "Individual quota reached" in text:
         match = re.search(r"Resets in ([^.]+)", text)
         reset_hint = f"（{match.group(0)}）" if match else ""
-        return f"Antigravity CLI 当前额度已用完{reset_hint}。稍后再试，或临时把 Connor 切回 Codex。"
+        return f"Antigravity CLI 当前额度已用完{reset_hint}。稍后再试，或临时切回 Codex。"
     auth_succeeded = (
         "silent auth succeeded" in text
         or "OAuth: authenticated successfully" in text
@@ -465,8 +549,14 @@ def _summarize_antigravity_log(log_path: Path | None) -> str:
         return "Antigravity CLI 拒绝了这次请求参数（INVALID_ARGUMENT）。通常是本次上下文、附件或特殊内容触发了后端参数校验，不是登录掉了；可以删短上下文或换下一条重试。"
     if "A required privilege is not held by the client" in text and "symlink" in text:
         return "Antigravity CLI 创建项目配置软链接失败。可以用管理员 PowerShell 运行 agy 完成一次初始化，或开启 Windows 开发者模式后再试。"
-    if "failed to get model config" in text or "FetchAvailableModels" in text:
+    if "failed to get model config" in text:
+        if auth_succeeded:
+            return "Antigravity CLI 已登录，但拉取模型配置失败，通常是网络/API 临时抖动；可以稍后重试，或先切回其他模型。"
         return "Antigravity CLI 没拿到可用模型配置，通常是 CLI 登录状态或网络代理还没通。"
+    if "FetchAvailableModels" in text:
+        if auth_succeeded:
+            return "Antigravity CLI 已登录，但模型列表拉取失败，通常是网络/API 临时抖动；可以稍后重试，或先切回其他模型。"
+        return "Antigravity CLI 没拿到可用模型列表，通常是 CLI 登录状态或网络代理还没通。"
     lines = [ln for ln in text.splitlines() if " E" in ln or " W" in ln or "error" in ln.lower() or "failed" in ln.lower()]
     if lines:
         return lines[-1][-500:]
@@ -483,6 +573,17 @@ def _is_antigravity_auth_prompt(text: str) -> bool:
         or "not logged into antigravity" in lowered
         or "accounts.google.com/o/oauth2" in lowered
     )
+
+
+def _strip_replacement_chars(text: str) -> str:
+    """Drop U+FFFD replacement chars introduced by lossy console capture.
+
+    This cannot reconstruct the original emoji/byte, but it prevents the
+    visible � marker from being persisted or re-injected into later prompts.
+    """
+    if not text:
+        return text
+    return text.replace("\ufffd", "")
 
 
 def _build_cli_prompt(messages: list, *, copy_cr_uploads: bool = False) -> str:
@@ -539,7 +640,7 @@ def _build_cli_prompt(messages: list, *, copy_cr_uploads: bool = False) -> str:
 
     for m in real_messages:
         role = m["role"]
-        content = (m.get("content", "") or "").strip()
+        content = _strip_replacement_chars((m.get("content", "") or "")).strip()
 
         # 处理附件：将图片/音频附件解析为本地绝对路径
         # 关键：不能用 `[图片附件] 路径` 这种 tag 风格的元数据标注，Gemini 会识别为
@@ -615,6 +716,29 @@ def _build_cli_prompt(messages: list, *, copy_cr_uploads: bool = False) -> str:
             parts.append(f"[User]\n{text}")
     parts.append("[Assistant]")
     return "\n\n".join(parts)
+
+
+def _with_antigravity_latest_anchor(messages: list) -> list:
+    """Keep agy focused on the newest user turn after long memory/tool blocks."""
+    if not messages or len(messages) < 2:
+        return messages
+    latest = None
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            content = (msg.get("content", "") or "").strip()
+            if content:
+                latest = content
+                break
+    if not latest:
+        return messages
+    anchor = (
+        "[当前必须优先回复的最新用户消息]\n"
+        f"{latest}\n\n"
+        "请优先、直接回应这条最新消息。上面的历史记录、记忆、日程和能力说明只作为背景；"
+        "不要把旧话题当成当前请求，也不要主动查看工作区文件或延续旧任务，除非这条最新消息明确要求。"
+    )
+    return [*messages, {"role": "user", "content": anchor}]
+
 
 async def _spawn_cli_process(cmd: list[str], prompt: str, env: dict | None = None):
     proc = await asyncio.create_subprocess_exec(
@@ -857,6 +981,47 @@ def _escape_json_string_newlines(text: str) -> str:
     return "".join(result)
 
 
+def _extract_balanced_json_prefix(text: str) -> str:
+    """Return the first balanced JSON object/array found in text, preserving fences."""
+    raw = (text or "").strip()
+    fence = re.search(r"```(?:json|JSON)?\s*([\s\S]*?)```", raw)
+    if fence:
+        inner = _extract_balanced_json_prefix(fence.group(1))
+        return f"```json\n{inner}\n```" if inner else ""
+
+    starts = [(pos, ch) for ch in "{}[]"[:0] for pos in ()]
+    for ch in ("{", "["):
+        pos = raw.find(ch)
+        if pos >= 0:
+            starts.append((pos, ch))
+    if not starts:
+        return ""
+    start, opener = min(starts, key=lambda x: x[0])
+    closer = "}" if opener == "{" else "]"
+    depth = 0
+    in_string = False
+    escaped = False
+    for idx in range(start, len(raw)):
+        ch = raw[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return raw[start:idx + 1].strip()
+    return ""
+
+
 def _extract_transcript_body(transcript_path: Path) -> str:
     """从 PowerShell Transcript 文件中提取有效输出内容。"""
     try:
@@ -890,7 +1055,208 @@ def _extract_transcript_body(transcript_path: Path) -> str:
     # 去掉首尾空行，但保留中间的空行
     result = "\n".join(kept).strip()
     result = _deduplicate_cjk(result)
+    result = _strip_replacement_chars(result)
     return _escape_json_string_newlines(result)
+
+
+def _antigravity_conversation_id_from_log(log_path: Path | None) -> str | None:
+    if not log_path or not log_path.exists():
+        return None
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    matches = re.findall(r"(?:Print mode: conversation=|Created conversation )([0-9a-f-]{36})", text)
+    return matches[-1] if matches else None
+
+
+def _read_protobuf_varint(data: bytes, offset: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    while offset < len(data) and shift < 70:
+        byte = data[offset]
+        offset += 1
+        value |= (byte & 0x7f) << shift
+        if byte < 0x80:
+            return value, offset
+        shift += 7
+    raise ValueError("invalid protobuf varint")
+
+
+def _extract_antigravity_protobuf_text(payload: bytes) -> str:
+    """Extract the final visible text field from an agy finalization protobuf frame."""
+    transcript_pos = payload.find(b"file:///")
+    data = payload[:transcript_pos] if transcript_pos > 0 else payload
+    candidates: list[str] = []
+
+    # The CLI schema is private and has changed between releases. Scanning every
+    # offset for valid length-delimited fields is stable enough to recover the
+    # visible response without decoding the whole protobuf message.
+    for start in range(len(data)):
+        try:
+            key, offset = _read_protobuf_varint(data, start)
+            if not key or (key & 7) != 2:
+                continue
+            size, offset = _read_protobuf_varint(data, offset)
+            if size < 1 or offset + size > len(data):
+                continue
+            value = data[offset:offset + size].decode("utf-8")
+        except (UnicodeDecodeError, ValueError):
+            continue
+
+        value = value.strip()
+        if not value or not all(ch.isprintable() or ch in "\r\n\t" for ch in value):
+            continue
+        if not any(ch.isalnum() or "\u4e00" <= ch <= "\u9fff" for ch in value):
+            continue
+        if value == "sessionID" or value.startswith("file:///"):
+            continue
+        if re.fullmatch(r"-?\d{10,}", value):
+            continue
+        if re.fullmatch(r"[0-9a-f-]{36}", value, re.IGNORECASE):
+            continue
+        if len(value) >= 12 and re.fullmatch(r"[A-Za-z0-9_+/=-]+", value):
+            continue
+        candidates.append(value)
+
+    return max(candidates, key=len) if candidates else ""
+
+
+def _strip_antigravity_wire_noise(text: str) -> str:
+    """Remove leaked agy session/protobuf metadata while preserving the response tail."""
+    cleaned = (text or "").strip()
+    if "sessionID" in cleaned and re.search(
+        r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", cleaned, re.I
+    ):
+        quote_pos = max(cleaned.rfind('"'), cleaned.rfind("“"))
+        if quote_pos >= 0 and cleaned[quote_pos + 1:].strip():
+            cleaned = cleaned[quote_pos + 1:].strip().rstrip('”')
+
+    # Some finalization frames begin in the middle of a HOME argument, e.g.
+    # "ture=24]", even though the command itself was already executed.
+    cleaned = re.sub(r"(?im)^\s*[A-Za-z_]{0,32}=\S*\]\s*(?:\r?\n)+", "", cleaned)
+    cleaned = re.sub(
+        r"(?im)^\s*[^\n\[]+\|(?:mode|hvac_mode|temperature|temp|fan_mode|fan|swing_mode|swing)\s*=[^\n\]]*\]\s*(?:\r?\n)+",
+        "",
+        cleaned,
+    )
+    # A bare Z immediately after a local command is an agy protobuf terminator.
+    cleaned = re.sub(r"(\[[A-Za-z_]+(?::[^\]]*)?\])Z\s*$", r"\1", cleaned)
+    return cleaned.strip()
+
+
+def _extract_antigravity_bot_text(payload: bytes) -> str:
+    """Extract a bot response before its protobuf Z terminator and binary tail."""
+    raw = payload.decode("utf-8", errors="ignore")
+    match = re.search(
+        r"bot-[0-9a-f-]{36}B[\x00-\x08\x0b\x0c\x0e-\x1f]*"
+        r"(.+?)Z(?=[\x00-\x08\x0b\x0c\x0e-\x1f])",
+        raw,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    candidate = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+", "", match.group(1))
+    return candidate.strip()
+
+
+def _extract_antigravity_sqlite_output(log_path: Path | None, *, prefer_bot: bool = False) -> str:
+    """Read the final agy response from its local conversation DB when transcript is stale."""
+    cid = _antigravity_conversation_id_from_log(log_path)
+    if not cid:
+        return ""
+    db_path = Path.home() / ".gemini" / "antigravity-cli" / "conversations" / f"{cid}.db"
+    if not db_path.exists():
+        return ""
+    try:
+        import sqlite3
+        con = sqlite3.connect(str(db_path))
+        rows = con.execute(
+            "SELECT idx, step_type, step_payload FROM steps "
+            "WHERE step_payload IS NOT NULL ORDER BY idx DESC"
+        ).fetchall()
+        con.close()
+    except Exception:
+        return ""
+
+    type15_rows = [row for row in rows if row[1] == 15]
+    type23_rows = [row for row in rows if row[1] == 23]
+    # Image/media calls finish in the printed bot frame after visual processing.
+    # On AGY 1.0.10, text-only calls also expose the user-visible printed answer
+    # more reliably in step_type=15. step_type=23 can contain a later concise
+    # rewrite/summary that does not match what print mode wrote to the console.
+    # Keep type23 as a fallback, but prefer the bot frame first.
+    ordered_rows = type15_rows + type23_rows
+    for _idx, step_type, payload in ordered_rows:
+        if step_type not in (15, 23):
+            continue
+        structured_text = (
+            _extract_antigravity_bot_text(payload)
+            if step_type == 15
+            else _extract_antigravity_protobuf_text(payload)
+        )
+        raw = payload.decode("utf-8", errors="ignore")
+        printable = re.sub(r"[^\x09\x0a\x0d\x20-\x7e\u4e00-\u9fff\uff00-\uffef]+", " ", raw)
+        if not printable.strip():
+            continue
+
+        # Finalization frames expose the response as a protobuf string field.
+        used_structured_text = bool(structured_text)
+        if structured_text:
+            candidate = structured_text
+        else:
+            # Normal assistant-message payloads often contain
+            # "...bot-<uuid>B <text> Z...".
+            bot_match = re.search(
+                r"bot-[0-9a-f-]{36}B\s*(.+?)(?:\s+Z\b|\s+` r\b|$)",
+                printable,
+                re.DOTALL,
+            )
+        if not structured_text and bot_match:
+            candidate = bot_match.group(1)
+        elif not structured_text:
+            # Finalization payloads may store the visible response before the
+            # generated transcript path, then echo the whole prompt afterwards.
+            candidate = printable
+            cut_markers = (
+                " file:///",
+                "\n[System Instruction]",
+                "\n[User]\n",
+                " [System Instruction]",
+            )
+            for marker in cut_markers:
+                pos = candidate.find(marker)
+                if pos > 0:
+                    candidate = candidate[:pos]
+                    break
+            # Drop protobuf-ish leading metadata up to the last quoted text marker.
+            quote_pos = candidate.rfind('" ')
+            if quote_pos >= 0:
+                candidate = candidate[quote_pos + 2:]
+
+        candidate = _strip_antigravity_wire_noise(candidate)
+        candidate = _strip_replacement_chars(candidate)
+        if not used_structured_text and not _looks_like_json_payload(candidate):
+            candidate = re.sub(r"^\s*[A-Za-z0-9_$:;@#%&*|<>\[\]{}()\\/\-.,!?`~\s]{0,240}", "", candidate)
+        candidate = re.sub(r"```Z\b", "```", candidate)
+        candidate = re.sub(r"\s+Z(?:\s*;\s*`\s*r[\s\S]*)?$", "", candidate)
+        candidate = re.sub(r"\s+Z\s*$", "", candidate)
+        candidate = re.sub(r"\s+H\s+`\s+z\s*$", "", candidate)
+        candidate = candidate.strip()
+        if re.match(r'^"[^"]+"\s*:', candidate):
+            candidate = "{" + candidate
+        balanced_json = _extract_balanced_json_prefix(candidate)
+        if balanced_json and (
+            _looks_like_json_payload(candidate)
+            or candidate.startswith("[")
+            or candidate.startswith("{")
+            or candidate.startswith("```")
+            or re.match(r'^"[^"]+"\s*:', candidate.lstrip("{"))
+        ):
+            candidate = balanced_json
+        if len(candidate) >= 2 and not candidate.startswith("[System Instruction]"):
+            return _escape_json_string_newlines(candidate)
+    return ""
 
 
 async def call_antigravity_cli(messages: list, model: str, meta: dict | None = None,
@@ -905,7 +1271,10 @@ async def call_antigravity_cli(messages: list, model: str, meta: dict | None = N
         yield "[AntigravityCLI错误] 未找到 agy CLI，请先运行 irm https://antigravity.google/cli/install.ps1 | iex"
         return
 
-    prompt = _build_cli_prompt(messages, copy_cr_uploads=True)
+    prefer_bot_output = any(bool(msg.get("attachments")) for msg in messages)
+    prompt = _build_cli_prompt(_with_antigravity_latest_anchor(messages), copy_cr_uploads=True)
+    if re.search(r"@[A-Za-z]:/[^\n]+\.(?:png|jpe?g|gif|webp|mp3|wav|m4a)\b", prompt, re.I):
+        prefer_bot_output = True
 
     log_dir = Path(__file__).parent / "data" / "cli_debug"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -934,7 +1303,10 @@ async def call_antigravity_cli(messages: list, model: str, meta: dict | None = N
         if SETTINGS.get("gemini_cli_tools_enabled", False):
             agy_args.append("--dangerously-skip-permissions")
         agy_args.extend(["--log-file", log_file])
-        if model:
+        pass_model = os.environ.get("AION_AGY_PASS_MODEL", "").strip().lower() in {"1", "true", "yes", "on"}
+        if isinstance(meta, dict) and meta.get("antigravity_pass_model"):
+            pass_model = True
+        if model and pass_model:
             agy_args.extend(["--model", model])
         agy_args.append("--print")
         # prompt 通过 base64 解码注入，避免 PS 转义问题
@@ -985,8 +1357,15 @@ async def call_antigravity_cli(messages: list, model: str, meta: dict | None = N
 
         returncode = await asyncio.to_thread(_run_agy_sync)
 
-        # 从 transcript 提取输出
-        output = _strip_antigravity_timeout_notice(_extract_transcript_body(Path(transcript_file)))
+        # Prefer agy's local conversation DB. On Windows, transcript can capture
+        # an early/stale print-mode segment while the DB has the final answer.
+        output = _strip_antigravity_timeout_notice(
+            _extract_antigravity_sqlite_output(
+                Path(log_file) if log_file else None,
+                prefer_bot=prefer_bot_output,
+            )
+            or _extract_transcript_body(Path(transcript_file))
+        )
 
         # 检查认证问题
         if _is_antigravity_auth_prompt(output):
@@ -1156,14 +1535,97 @@ async def call_codex_cli(messages: list, model: str, meta: dict | None = None,
 
 
 # ── 非流式调用（收集流式输出） ────────────────────
-async def simple_ai_call(messages: list, model_key: str, temperature: float | None = None) -> str:
-    """收集 stream_ai 的全部 chunk，返回完整文本（自动过滤 CLI_STATUS 状态行）"""
-    full_text = ""
-    async for chunk in stream_ai(messages, model_key, temperature=temperature):
-        if chunk.startswith(CLI_STATUS_PREFIX):
+def _cleanup_model_raw_responses(log_dir: Path = MODEL_RAW_RESPONSE_DIR, now: float | None = None) -> int:
+    """删除超过三天的非流式模型原始响应日志。"""
+    cutoff = float(now if now is not None else time.time()) - MODEL_RAW_RESPONSE_RETENTION_SECONDS
+    if not log_dir.exists():
+        return 0
+    removed = 0
+    for path in log_dir.glob("*.json"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
             continue
-        full_text += chunk
-    return full_text
+    return removed
+
+
+def _save_model_raw_response(
+    *,
+    messages: list,
+    model_key: str,
+    trace_label: str,
+    raw_response: str,
+    filtered_response: str,
+    error: str = "",
+    started_at: float,
+    finished_at: float,
+    log_dir: Path = MODEL_RAW_RESPONSE_DIR,
+) -> Path | None:
+    """保存模型调用的原始返回和请求上下文，供近三天故障追踪。"""
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        _cleanup_model_raw_responses(log_dir, finished_at)
+        safe_label = re.sub(r"[^0-9A-Za-z_.-]+", "_", trace_label or "simple_ai_call").strip("_")[:60]
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(started_at))
+        path = log_dir / f"{stamp}_{safe_label or 'simple_ai_call'}_{uuid.uuid4().hex[:8]}.json"
+        payload = {
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "duration_seconds": round(max(0.0, finished_at - started_at), 3),
+            "trace_label": trace_label or "simple_ai_call",
+            "model_key": model_key,
+            "provider": (MODELS.get(model_key) or {}).get("provider", "unknown"),
+            "request_messages": messages,
+            "raw_response": raw_response,
+            "filtered_response": filtered_response,
+            "error": error,
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        return path
+    except Exception as exc:
+        print(f"[model_raw_response] 保存失败: {exc}")
+        return None
+
+
+# 服务启动时也执行一次，避免长时间没有新调用时遗留过期日志。
+_cleanup_model_raw_responses()
+
+
+async def simple_ai_call(
+    messages: list,
+    model_key: str,
+    temperature: float | None = None,
+    *,
+    trace_label: str = "simple_ai_call",
+) -> str:
+    """收集 stream_ai 的全部 chunk并留存三天原始响应，返回过滤状态行后的正文。"""
+    started_at = time.time()
+    full_text = ""
+    raw_chunks = []
+    error = ""
+    try:
+        async for chunk in stream_ai(messages, model_key, temperature=temperature):
+            raw_chunks.append(chunk)
+            if chunk.startswith(CLI_STATUS_PREFIX):
+                continue
+            full_text += chunk
+        return full_text
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        _save_model_raw_response(
+            messages=messages,
+            model_key=model_key,
+            trace_label=trace_label,
+            raw_response="".join(raw_chunks),
+            filtered_response=full_text,
+            error=error,
+            started_at=started_at,
+            finished_at=time.time(),
+        )
 
 
 # ── 哨兵代看：为不支持视觉的模型描述图片 ─────────────
@@ -1280,6 +1742,11 @@ async def stream_ai(messages: list, model_key: str, meta: dict | None = None, te
             yield chunk
     elif cfg["provider"] == "aipro":
         async for chunk in call_aipro(normalized, cfg["model"], meta, temperature, max_tokens):
+            if cancel_event and cancel_event.is_set():
+                return
+            yield chunk
+    elif cfg["provider"] == "custom_openai":
+        async for chunk in call_custom_openai(normalized, cfg, meta, temperature, max_tokens):
             if cancel_event and cancel_event.is_set():
                 return
             yield chunk

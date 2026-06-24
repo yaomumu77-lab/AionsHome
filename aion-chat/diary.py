@@ -11,23 +11,97 @@ from database import get_db
 from ws import manager
 
 
+def _is_diary_payload(data: Any) -> bool:
+    """只接受包含日记字段的顶层对象，避免误把嵌套的 moment 当成完整结果。"""
+    return isinstance(data, dict) and "diary" in data
+
+
+def _repair_unescaped_json_quotes(candidate: str, max_repairs: int = 32) -> Optional[dict[str, Any]]:
+    """有限修复模型在 JSON 字符串正文中遗漏转义的双引号。"""
+    repaired = candidate
+    for _ in range(max_repairs + 1):
+        try:
+            data = json.loads(repaired, strict=False)
+            return data if _is_diary_payload(data) else None
+        except json.JSONDecodeError as exc:
+            # 当字符串被正文里的裸引号提前截断时，解析器会在该引号之后报告缺少逗号。
+            quote_pos = -1
+            if exc.msg == "Expecting ',' delimiter":
+                if exc.pos < len(repaired) and repaired[exc.pos] == '"':
+                    quote_pos = exc.pos
+                elif exc.pos > 0 and repaired[exc.pos - 1] == '"':
+                    quote_pos = exc.pos - 1
+            elif exc.msg in {
+                "Expecting property name enclosed in double quotes",
+                "Expecting value",
+            }:
+                # 引用文字后紧跟英文逗号时，解析器会把内层引号和逗号误当作字段结束。
+                cursor = exc.pos - 1
+                while cursor >= 0 and repaired[cursor].isspace():
+                    cursor -= 1
+                if cursor >= 0 and repaired[cursor] == ",":
+                    cursor -= 1
+                    while cursor >= 0 and repaired[cursor].isspace():
+                        cursor -= 1
+                    if cursor >= 0 and repaired[cursor] == '"':
+                        quote_pos = cursor
+            if quote_pos < 0:
+                return None
+            repaired = repaired[:quote_pos] + "\\" + repaired[quote_pos:]
+    return None
+
+
 def parse_diary_payload(raw: str) -> Optional[dict[str, Any]]:
     """从模型输出中提取日记 JSON。"""
     if not raw:
         return None
     text = raw.strip()
-    if "```" in text:
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start >= 0 and end > start:
-            text = text[start:end]
-    try:
-        data = json.loads(text)
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    return data
+    decoder = json.JSONDecoder(strict=False)
+    # 兼容代码块、前后解释文字和多个候选片段；从每个左花括号尝试解析首个完整对象。
+    for start, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            data, _ = decoder.raw_decode(text[start:])
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if _is_diary_payload(data):
+            return data
+
+    # 常见模型漂移：日记正文引用原话时忘记把双引号写成 \"。
+    # 仅修复可重新解析且结构完整的候选对象，其他格式错误继续按失败处理。
+    final_brace = text.rfind("}")
+    if final_brace >= 0:
+        for start, char in enumerate(text[:final_brace]):
+            if char != "{":
+                continue
+            data = _repair_unescaped_json_quotes(text[start:final_brace + 1])
+            if data is not None:
+                return data
+    return None
+
+
+_MODEL_ERROR_PREFIXES = (
+    "[硅基流动错误",
+    "[中转站错误",
+    "[Gemini错误",
+    "[AntigravityCLI错误",
+    "[CodexCLI错误",
+    "[错误]",
+)
+
+
+def diary_response_error(raw: str) -> str:
+    """识别被模型适配层作为普通文本返回的线路错误。"""
+    text = str(raw or "").strip()
+    if not text:
+        return "模型返回为空"
+    if text.startswith(_MODEL_ERROR_PREFIXES):
+        return text[:300]
+    lowered = text.lower()
+    if "authentication required" in lowered or "authentication timed out" in lowered:
+        return "模型线路认证失败或超时"
+    return ""
 
 
 def normalize_diary_payload(data: dict[str, Any]) -> tuple[dict[str, str], Optional[dict[str, Any]]]:

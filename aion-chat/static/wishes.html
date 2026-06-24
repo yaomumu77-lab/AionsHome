@@ -491,6 +491,33 @@ html.aion-app.aion-iframe .wish-chrome {
   box-shadow: inset 0 1px 1px rgba(255,255,255,0.13), 0 16px 36px rgba(0,0,0,0.18);
   padding: 14px;
 }
+.wish-card.long-pressable {
+  position: relative;
+  cursor: pointer;
+  touch-action: pan-y;
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+  overflow: hidden;
+}
+.wish-card.long-pressable.is-pressing {
+  transform: scale(0.985);
+  border-color: rgba(165, 240, 255, 0.72);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,0.16), 0 0 28px rgba(103, 215, 255, 0.24);
+}
+.wish-card.long-pressable.is-pressing::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  transform-origin: left;
+  background: linear-gradient(90deg, #6cecff, #b8a7ff);
+  animation: wishLongPressProgress 650ms linear forwards;
+}
+@keyframes wishLongPressProgress {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
 .wish-card + .wish-card {
   margin-top: 10px;
 }
@@ -761,6 +788,7 @@ html.aion-app.aion-iframe .wish-chrome {
       <div>
         <div class="wish-panel-title">愿望册</div>
         <div class="wish-counts" id="wishCounts"></div>
+        <div class="wish-counts">长按池中的愿望，可以指定去实现</div>
       </div>
       <button class="wish-close" type="button" onclick="closeOverlay('wishBookOverlay')" aria-label="关闭">×</button>
     </div>
@@ -777,6 +805,7 @@ html.aion-app.aion-iframe .wish-chrome {
 <script src="/static/common.js"></script>
 <script>
 const WISH_CONTENT_MAX = 100;
+const WISH_LONG_PRESS_MS = 650;
 const state = {
   wishes: [],
   counts: { all: 0, active: 0, fulfilled: 0, released: 0 },
@@ -784,7 +813,11 @@ const state = {
   selectedAuthor: 'user',
   bookFilter: 'all',
   currentWish: null,
+  bookPulling: false,
 };
+let wishLongPressTimer = null;
+let wishLongPressTarget = null;
+let wishLongPressStart = null;
 
 function goBack() {
   if (window.parent !== window && typeof window.parent.navigateToHome === 'function') {
@@ -917,8 +950,10 @@ function renderWishCard(wish, options = {}) {
     <div class="wish-card-actions">
       <button class="wish-mini-icon danger" type="button" onclick="removeWish('${wish.id}')" title="删除">×</button>
     </div>` : '';
+  const canLongPress = options.list && wish.status === 'active';
   return `
-    <article class="wish-card ${options.result ? 'result' : ''}">
+    <article class="wish-card ${options.result ? 'result' : ''} ${canLongPress ? 'long-pressable' : ''}"
+      ${canLongPress ? `data-wish-id="${escHtml(wish.id)}" aria-label="长按指定实现：${escHtml(wish.content || '')}"` : ''}>
       <div class="wish-card-top">
         <div class="wish-meta">
           <span class="wish-badge ${escHtml(author)}">${escHtml(wish.author_name || actorName(author))}</span>
@@ -940,11 +975,13 @@ function renderWishCard(wish, options = {}) {
   `;
 }
 
-function renderWishResult(wish) {
+function renderWishResult(wish, title = '捞起一个愿望') {
   const body = document.getElementById('wishResultBody');
+  const titleBox = document.getElementById('wishResultTitle');
   const implementBtn = document.getElementById('wishResultImplementBtn');
   const completeBtn = document.getElementById('wishResultCompleteBtn');
   state.currentWish = wish || null;
+  if (titleBox) titleBox.textContent = title;
   setImplementChoices(false);
   if (implementBtn) implementBtn.disabled = !wish;
   if (completeBtn) completeBtn.hidden = !wish;
@@ -977,11 +1014,8 @@ function toggleImplementChoices() {
 
 async function drawOneWish() {
   const btn = document.getElementById('drawWishBtn');
-  const focus = document.getElementById('wishPoolFocus');
   btn.disabled = true;
-  focus.classList.remove('rippling');
-  void focus.offsetWidth;
-  focus.classList.add('rippling');
+  rippleWishPool();
   try {
     const data = await api('POST', '/api/wishes/draw?drawer=user');
     renderWishResult(data.wish);
@@ -992,6 +1026,42 @@ async function drawOneWish() {
     showToast('捞取失败');
   } finally {
     btn.disabled = false;
+  }
+}
+
+function rippleWishPool() {
+  const focus = document.getElementById('wishPoolFocus');
+  if (!focus) return;
+  focus.classList.remove('rippling');
+  void focus.offsetWidth;
+  focus.classList.add('rippling');
+}
+
+function clearWishLongPress() {
+  if (wishLongPressTimer) clearTimeout(wishLongPressTimer);
+  wishLongPressTimer = null;
+  wishLongPressTarget?.classList.remove('is-pressing');
+  wishLongPressTarget = null;
+  wishLongPressStart = null;
+}
+
+async function pullWishFromBook(id) {
+  if (!id || state.bookPulling) return;
+  state.bookPulling = true;
+  clearWishLongPress();
+  try {
+    const data = await api('POST', `/api/wishes/${encodeURIComponent(id)}/draw`);
+    if (!data?.wish) throw new Error('wish unavailable');
+    closeOverlay('wishBookOverlay');
+    rippleWishPool();
+    renderWishResult(data.wish, '恰好捞起这个愿望');
+    showOverlay('wishResultOverlay');
+    await loadWishes();
+  } catch (e) {
+    showToast('这个愿望已经不在池中了');
+    await loadWishes().catch(() => {});
+  } finally {
+    state.bookPulling = false;
   }
 }
 
@@ -1023,6 +1093,28 @@ function renderBook() {
   }
   list.innerHTML = items.map(wish => renderWishCard(wish, { list: true })).join('');
 }
+
+const wishBookList = document.getElementById('wishBookList');
+wishBookList?.addEventListener('pointerdown', event => {
+  if (state.bookPulling || event.button > 0 || event.target.closest('button')) return;
+  const card = event.target.closest('.wish-card.long-pressable');
+  if (!card) return;
+  clearWishLongPress();
+  wishLongPressTarget = card;
+  wishLongPressStart = { x: event.clientX, y: event.clientY };
+  card.classList.add('is-pressing');
+  wishLongPressTimer = setTimeout(() => pullWishFromBook(card.dataset.wishId), WISH_LONG_PRESS_MS);
+});
+wishBookList?.addEventListener('pointermove', event => {
+  if (!wishLongPressStart) return;
+  if (Math.hypot(event.clientX - wishLongPressStart.x, event.clientY - wishLongPressStart.y) > 12) {
+    clearWishLongPress();
+  }
+});
+['pointerup', 'pointercancel'].forEach(type => wishBookList?.addEventListener(type, clearWishLongPress));
+wishBookList?.addEventListener('contextmenu', event => {
+  if (event.target.closest('.wish-card.long-pressable') && !event.target.closest('button')) event.preventDefault();
+});
 
 function parentConvId() {
   try {

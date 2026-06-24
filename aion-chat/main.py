@@ -20,7 +20,7 @@ logging.getLogger("uvicorn.access").addFilter(_QuietCamFilter())
 
 # 静默 Windows asyncio ProactorEventLoop 连接重置的噪音日志
 logging.getLogger("asyncio").setLevel(logging.CRITICAL)
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from config import BASE_DIR, PUBLIC_DIR, UPLOADS_DIR, SONGS_DIR, CODEX_UPLOADS_DIR, SCREENSHOTS_DIR, load_cam_config
 from database import init_db, get_db
@@ -56,12 +56,15 @@ from routes import search as search_routes
 from routes import autonomy as autonomy_routes
 from routes import persona_evolution as persona_evolution_routes
 from routes import wishes as wishes_routes
+from routes import xhs_lite as xhs_lite_routes
 from activity import pc_tracker, pc_display_tracker
 from memory import auto_digest
 from chatroom import _connor_1v1_auto_digest_loop
 from fund import fund_scheduler
 from autonomy import idle_autonomy_mgr
 from persona_evolution import main_ai_persona_evolution_loop, connor_persona_evolution_loop
+from asset_manifest import get_client_asset_manifest
+from home_assistant_events import ha_event_listener
 
 
 # ── 自动记忆总结定时任务 ──────────────────────────
@@ -142,7 +145,9 @@ async def lifespan(app: FastAPI):
     persona_evolution_task = asyncio.create_task(main_ai_persona_evolution_loop())
     connor_persona_evolution_task = asyncio.create_task(connor_persona_evolution_loop())
     idle_autonomy_mgr.start()
+    ha_event_listener.start()
     yield
+    await ha_event_listener.stop()
     idle_autonomy_mgr.stop()
     connor_persona_evolution_task.cancel()
     persona_evolution_task.cancel()
@@ -158,7 +163,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# 全局禁用静态文件缓存
+# Static files keep their existing URLs, so browsers must revalidate them. The
+# Android app additionally uses /api/client-assets to share verified objects
+# between LAN, Tailscale, and Cloudflare origins.
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -174,7 +181,7 @@ class NoCacheStaticMiddleware(BaseHTTPMiddleware):
                 return Response("wallpaper only available on local network", status_code=403)
         response = await call_next(request)
         if request.url.path.startswith("/static/"):
-            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Cache-Control"] = "public, max-age=0, must-revalidate"
         return response
 
 app.add_middleware(NoCacheStaticMiddleware)
@@ -220,6 +227,15 @@ app.include_router(search_routes.router)
 app.include_router(autonomy_routes.router)
 app.include_router(persona_evolution_routes.router)
 app.include_router(wishes_routes.router)
+app.include_router(xhs_lite_routes.router)
+
+
+@app.get("/api/client-assets")
+async def client_assets():
+    return JSONResponse(
+        get_client_asset_manifest(),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # 页面
@@ -318,6 +334,10 @@ async def seeky_page():
 @app.get("/wishes")
 async def wishes_page():
     return FileResponse(BASE_DIR / "static" / "wishes.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+@app.get("/xhs-lite")
+async def xhs_lite_page():
+    return FileResponse(BASE_DIR / "static" / "xhs-lite.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/health")
 async def health_page():

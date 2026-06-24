@@ -17,7 +17,7 @@ from luckin import LUCKIN_CMD_PATTERN, luckin_ability_text
 from song_gen import SONG_CMD_PATTERN, build_song_gen_ability_text
 from memory import (
     instant_digest, recall_memories, build_surfacing_memories,
-    fetch_source_details,
+    fetch_source_details, _memory_line_with_evidence,
 )
 
 # ── 工具指令正则（供调用方做后处理用，集中定义） ──
@@ -424,11 +424,11 @@ async def build_memory_blocks(
       chatroom_source_fn: 可选的聊天室原文追溯函数 async (memories, keywords) -> str
       skip_digest: 跳过 instant_digest（快速模式）
       digest_result: 外部传入的 digest 结果（复用同一次调用）
-      always_include_recalled: 是否每轮都注入最高相关的摘要记忆；原文细节仍由 require_detail 控制
+      always_include_recalled: 是否每轮都注入最高相关的摘要记忆；记忆证据仍由 require_detail 控制
 
     返回 dict:
       time_block: str — 当前时间 + 背景记忆文本
-      memory_block: str — 相关记忆 + 原文细节文本（可能为空）
+      memory_block: str — 相关记忆 + 记忆证据文本（可能为空）
       digest_result: dict — instant_digest 的结果
     """
     now_str = datetime.now().strftime("%Y年%m月%d日  %H:%M:%S")
@@ -504,8 +504,8 @@ async def build_memory_blocks(
 
     # 背景记忆
     if surfaced:
-        unresolved_lines = [f"📌 {m['content']}（还没做/还没去）" for m in surfaced if m.get("unresolved")]
-        normal_lines = [f"- {m['content']}" for m in surfaced if not m.get("unresolved")]
+        unresolved_lines = [f"📌 {_memory_line_with_evidence(m)[2:]}（还没做/还没去）" for m in surfaced if m.get("unresolved")]
+        normal_lines = [_memory_line_with_evidence(m) for m in surfaced if not m.get("unresolved")]
         mem_text = "\n".join(unresolved_lines + normal_lines)
         time_block += f"\n\n[背景记忆]\n以下是你记得的近期事件和需要关注的事项，在对话中如果有关联可以自然提起：\n{mem_text}"
 
@@ -525,7 +525,7 @@ async def build_memory_blocks(
             recalled = recalled[:8]
 
     if recalled:
-        mem_lines = "\n".join([f"- {m['content'][:200]}" for m in recalled])
+        mem_lines = "\n".join([_memory_line_with_evidence(m, 200) for m in recalled])
         memory_block = f"[相关记忆]\n你脑海中与当前话题相关的记忆：\n{mem_lines}"
         if digest_result.get("require_detail"):
             detail_text = ""
@@ -538,7 +538,7 @@ async def build_memory_blocks(
                     [r for r in recalled if r.get("source_start_ts")], recall_keywords
                 )
             if detail_text:
-                memory_block += f"\n\n[原文细节]\n以下是相关的具体对话记录：\n{detail_text}"
+                memory_block += f"\n\n[记忆来源原文]\n以下是相关记忆挂载的来源原文；旧记忆没有精确来源时才会按时间范围回退筛选原文：\n{detail_text}"
 
     debug_candidates = []
     seen_debug = set()
@@ -608,8 +608,7 @@ async def fetch_merged_timeline(
         按 created_at 升序排列的消息列表，每条包含:
         source ("private"/"group"), sender, content, created_at, attachments
     """
-    # Keep conv_id/room_id for caller compatibility. Context is intentionally
-    # resolved across all relevant windows, then trimmed by global recency.
+    # Private chat respects conv_id when provided; group chat remains shared.
     results = []
 
     async with get_db() as db:
@@ -617,13 +616,22 @@ async def fetch_merged_timeline(
 
         # ── 私聊消息 ──
         if who == "aion":
-            cur = await db.execute(
-                "SELECT role AS sender, content, created_at, attachments "
-                "FROM messages "
-                "WHERE role IN ('user','assistant','system') "
-                "ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            )
+            if conv_id:
+                cur = await db.execute(
+                    "SELECT role AS sender, content, created_at, attachments "
+                    "FROM messages "
+                    "WHERE conv_id=? AND role IN ('user','assistant','system') "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (conv_id, limit),
+                )
+            else:
+                cur = await db.execute(
+                    "SELECT role AS sender, content, created_at, attachments "
+                    "FROM messages "
+                    "WHERE role IN ('user','assistant','system') "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                )
             for r in await cur.fetchall():
                 d = dict(r)
                 d["source"] = "private"

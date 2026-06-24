@@ -82,12 +82,26 @@ async def judge_and_send_gift(
         print(f"[gift] AI 判断解析失败: {e}")
         return
 
-    if not result.get("givegift"):
+    await send_gift_from_decision(result, sender=sender)
+
+
+async def send_gift_from_decision(
+    decision: dict,
+    *,
+    sender: str = "aion",
+):
+    """执行模型已经做出的送礼决定，不再额外调用模型。"""
+    if not isinstance(decision, dict) or not decision.get("givegift"):
         print("[gift] AI 决定不送礼")
         return
 
-    image_prompt = result.get("image_prompt", "").strip()
-    gift_message = result.get("message", "").strip()
+    gift_data = decision.get("gift", decision)
+    if not isinstance(gift_data, dict):
+        print("[gift] 礼物数据格式无效，跳过")
+        return
+
+    image_prompt = str(gift_data.get("image_prompt") or "").strip()
+    gift_message = str(gift_data.get("message") or "").strip()
 
     if not image_prompt or not gift_message:
         print("[gift] 缺少 image_prompt 或 message，跳过")

@@ -128,11 +128,32 @@ function getSolidVisualColor(foregroundValue, backgroundValue) {
   });
 }
 
-// 在 iframe 子页面浮层中时，返回按钮改为回到 Home 页面
+function getSubPageReturnUrl() {
+  const returnTo = new URLSearchParams(window.location.search).get('return');
+  if (!returnTo) return '/';
+  try {
+    const target = new URL(returnTo, window.location.origin);
+    if (target.origin !== window.location.origin) return '/';
+    return `${target.pathname}${target.search}${target.hash}`;
+  } catch(e) {
+    return '/';
+  }
+}
+
+function navigateSubPageBack() {
+  const returnTo = getSubPageReturnUrl();
+  if (window.parent !== window && typeof window.parent.openSubPage === 'function') {
+    window.parent.openSubPage(returnTo);
+  } else {
+    window.location.href = returnTo;
+  }
+}
+
+// iframe 子页面默认返回 Home；带 return 参数时回到指定的父页面功能。
 if (window.parent !== window) {
   document.addEventListener('DOMContentLoaded', () => {
     const backBtn = document.querySelector('.top-bar .back-btn');
-    if (backBtn) backBtn.onclick = () => window.parent.navigateToHome();
+    if (backBtn) backBtn.onclick = navigateSubPageBack;
   });
 }
 

@@ -1,6 +1,7 @@
 let conversations = [];
 let currentConvId = null;
 let currentMessages = [];
+let serverMessageIds = new Set();
 let models = [];
 let sending = false;
 let streamingAiId = null;
@@ -805,6 +806,7 @@ let ttsManualStop = false;
 let ttsChunkQueues = {};
 let ttsPlayOrder = []; // 按到达顺序记录 msgId，确保跨消息顺序播放
 let ttsAcceptAfter = Date.now() / 1000;
+let ttsPlaybackActiveAt = Date.now() / 1000;
 const ttsSuppressedMsgIds = new Set();
 
 function clearTTSResumeTimer() {
@@ -827,7 +829,7 @@ function scheduleTTSResume() {
 }
 
 function isTTSPlaybackAllowed() {
-  return document.visibilityState !== 'hidden';
+  return true;
 }
 
 function stopLiveTTSQueue() {
@@ -850,11 +852,6 @@ function suppressTTSMsg(msgId) {
 function shouldAcceptTTSMsg(msgId, createdAt, targetClientId) {
   if (!msgId || ttsSuppressedMsgIds.has(msgId)) return false;
   if (targetClientId && targetClientId !== _clientId) return false;
-  if (!isTTSPlaybackAllowed()) {
-    suppressTTSMsg(msgId);
-    stopLiveTTSQueue();
-    return false;
-  }
   const ts = Number(createdAt || 0);
   if (ts && ts < ttsAcceptAfter) {
     suppressTTSMsg(msgId);
@@ -870,21 +867,13 @@ function _sendTTSState() {
       enabled: ttsEnabled,
       voice: ttsVoiceId,
       can_play: isTTSPlaybackAllowed(),
-      active_at: Date.now() / 1000,
+      active_at: ttsPlaybackActiveAt,
       client_id: _clientId
     }));
   }
 }
 
 function refreshTTSPlaybackState() {
-  ttsAcceptAfter = Date.now() / 1000;
-  if (!isTTSPlaybackAllowed()) stopLiveTTSQueue();
-  _sendTTSState();
-}
-
-function suspendTTSPlaybackState() {
-  ttsAcceptAfter = Date.now() / 1000;
-  stopLiveTTSQueue();
   _sendTTSState();
 }
 
@@ -893,16 +882,17 @@ function bumpTTSPlaybackState() {
   const now = Date.now();
   if (now - ttsPlaybackStateLastSent < 1000) return;
   ttsPlaybackStateLastSent = now;
+  ttsPlaybackActiveAt = now / 1000;
   _sendTTSState();
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (isTTSPlaybackAllowed()) refreshTTSPlaybackState();
-  else suspendTTSPlaybackState();
+  if (document.visibilityState === 'hidden') refreshTTSPlaybackState();
+  else bumpTTSPlaybackState();
 });
-window.addEventListener('pagehide', suspendTTSPlaybackState);
-window.addEventListener('pageshow', refreshTTSPlaybackState);
-document.addEventListener('freeze', suspendTTSPlaybackState);
+window.addEventListener('pagehide', refreshTTSPlaybackState);
+window.addEventListener('pageshow', bumpTTSPlaybackState);
+document.addEventListener('freeze', refreshTTSPlaybackState);
 window.addEventListener('focus', bumpTTSPlaybackState);
 document.addEventListener('pointerdown', bumpTTSPlaybackState, { passive: true });
 document.addEventListener('keydown', bumpTTSPlaybackState);
@@ -911,6 +901,7 @@ function toggleTTS() {
   ttsEnabled = $('ttsToggle').checked;
   localStorage.setItem('aion_tts_enabled', ttsEnabled);
   ttsAcceptAfter = Date.now() / 1000;
+  ttsPlaybackActiveAt = ttsAcceptAfter;
   _sendTTSState();
   if (!ttsEnabled) {
     stopLiveTTSQueue();
@@ -920,6 +911,7 @@ function toggleTTS() {
 function changeTTSVoice() {
   ttsVoiceId = $('ttsVoiceSelect').value;
   localStorage.setItem('aion_tts_voice', ttsVoiceId);
+  ttsPlaybackActiveAt = Date.now() / 1000;
   _sendTTSState();
 }
 
@@ -1176,6 +1168,56 @@ async function api(method, url, body) {
   return res.json();
 }
 
+function _dedupeMessagesById(messages) {
+  const seen = new Map();
+  const out = [];
+  for (const msg of messages || []) {
+    if (!msg || !msg.id) {
+      out.push(msg);
+      continue;
+    }
+    if (seen.has(msg.id)) {
+      out[seen.get(msg.id)] = msg;
+    } else {
+      seen.set(msg.id, out.length);
+      out.push(msg);
+    }
+  }
+  return out;
+}
+
+function _replaceTempUserIfNeeded(msg) {
+  if (!msg || msg.role !== "user") return false;
+  const ti = currentMessages.findIndex(m => m.id === "temp_user" && m.conv_id === msg.conv_id);
+  if (ti < 0) return false;
+  currentMessages[ti] = msg;
+  currentMessages = _dedupeMessagesById(currentMessages);
+  return true;
+}
+
+function upsertCurrentMessage(msg, { replaceTempUser = false } = {}) {
+  if (!msg || !msg.id) return "ignored";
+  const existingIdx = currentMessages.findIndex(m => m.id === msg.id);
+  if (existingIdx >= 0) {
+    const existing = currentMessages[existingIdx];
+    if (msg.role === "assistant" && msg.content === "..." && existing?.content && existing.content !== "...") {
+      return "updated";
+    }
+    currentMessages[existingIdx] = msg;
+    currentMessages = _dedupeMessagesById(currentMessages);
+    return "updated";
+  }
+  if (replaceTempUser && _replaceTempUserIfNeeded(msg)) return "updated";
+  currentMessages.push(msg);
+  currentMessages = _dedupeMessagesById(currentMessages);
+  return "inserted";
+}
+
+function setCurrentMessages(messages) {
+  currentMessages = _dedupeMessagesById(messages);
+  currentMessages.forEach(m => { if (m?.id && !String(m.id).startsWith("temp_")) serverMessageIds.add(m.id); });
+}
+
 // ── WebSocket 同步 ──
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -1205,24 +1247,23 @@ function handleSync(msg) {
     renderConvList();
     if (data.id === currentConvId) { currentConvId = null; currentMessages = []; localStorage.removeItem('aion_last_conv'); renderMessages(); }
   } else if (type === "msg_created") {
+    const wasServerCounted = serverMessageIds.has(data.id);
+    serverMessageIds.add(data.id);
     if (data.conv_id === currentConvId) {
       // 正在流式的 AI 消息 → 用完整内容替换
       if (data.id === streamingAiId) {
-        const mi = currentMessages.findIndex(m => m.id === data.id);
-        if (mi >= 0) currentMessages[mi] = data;
-        else currentMessages.push(data);
+        upsertCurrentMessage(data);
         streamingAiId = null;
         renderMessages();
       }
       // 临时用户消息被真实消息替换
       else if (currentMessages.find(m => m.id === "temp_user") && data.role === "user") {
-        const ti = currentMessages.findIndex(m => m.id === "temp_user");
-        if (ti >= 0) currentMessages[ti] = data;
+        upsertCurrentMessage(data, { replaceTempUser: true });
         renderMessages();
       }
       // 其他端发来的新消息（含 Core 主动发言 / 语音唤醒）
       else if (!currentMessages.find(m => m.id === data.id)) {
-        currentMessages.push(data);
+        upsertCurrentMessage(data);
         playRecv();
         // CAM_CHECK 响应到达：收到 assistant 消息时关闭「正在查看监控」提示
         if (data.role === 'assistant' && camCheckMsgId) dismissCamCheckIndicator();
@@ -1240,7 +1281,7 @@ function handleSync(msg) {
     }
     const ci = conversations.findIndex(c => c.id === data.conv_id);
     if (ci >= 0) {
-      if (conversations[ci].message_count != null) conversations[ci].message_count++;
+      if (!wasServerCounted && conversations[ci].message_count != null) conversations[ci].message_count++;
       if (ci > 0) { const [c] = conversations.splice(ci, 1); conversations.unshift(c); }
       renderConvList();
     }
@@ -1249,6 +1290,10 @@ function handleSync(msg) {
       const mi = currentMessages.findIndex(m => m.id === data.id);
       if (mi >= 0) { currentMessages[mi] = data; renderMessages(); }
     }
+  } else if (type === "wish_updated") {
+    document.querySelectorAll('.wish-fulfill-card').forEach(card => {
+      if (card.dataset.wishId === data.id) applyWishCardStatus(card, data.status || 'active');
+    });
   } else if (type === "msg_deleted") {
     if (data.conv_id === currentConvId) {
       currentMessages = currentMessages.filter(m => m.id !== data.id);
@@ -1259,7 +1304,7 @@ function handleSync(msg) {
   } else if (type === "file_synced") {
     if (data.conv_id === currentConvId) {
       api("GET", `/api/conversations/${currentConvId}/messages?limit=${MSG_PAGE_SIZE}`).then(msgs => {
-        currentMessages = msgs;
+        setCurrentMessages(msgs);
         hasMoreMessages = msgs.length >= MSG_PAGE_SIZE;
         renderMessages();
       });
@@ -1397,7 +1442,7 @@ function messagesForDisplay(messages) {
   const out = [];
   const pendingById = new Map();
   let pendingLegacyNotices = [];
-  const list = messages || [];
+  const list = _dedupeMessagesById(messages || []);
   const indexById = new Map(list.map((m, idx) => [m?.id, idx]));
 
   function appendPendingFor(id) {
@@ -1507,6 +1552,7 @@ function renderMessages() {
     const feedbackHtml = isAssistant ? `<span class="msg-feedback-actions">
       <button class="msg-feedback-btn ${m.ai_feedback_rating === 'like' ? 'active' : ''}" onclick="openMsgFeedback(event,'${m.id}','like')" title="喜欢这条回复">👍</button>
       <button class="msg-feedback-btn ${m.ai_feedback_rating === 'dislike' ? 'active' : ''}" onclick="openMsgFeedback(event,'${m.id}','dislike')" title="不喜欢这条回复">👎</button>
+      ${m.reasoning_content ? `<button class="msg-feedback-btn msg-reasoning-btn" onclick="openMsgReasoning(event,'${m.id}')" title="查看思考过程">💭</button>` : ''}
     </span>` : '';
     const messageAttachments = withWishFallbackAttachments(m);
     const rawDisplayContent = isUser ? (m.content || '') : (m.content || '').replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
@@ -1518,7 +1564,10 @@ function renderMessages() {
     const parts = (isUser ? splitContent.split(/\n+/) : splitContent.split(/\n+/)).filter(p => p.trim());
     let bubblesHtml;
     if (hasWishFulfillmentAtt) {
-      bubblesHtml = `<div class="msg-bubbles wish-card-bubbles">${renderAttachments(messageAttachments)}</div>`;
+      const explanationHtml = !isUser
+        ? parts.map(p => `<div class="msg-bubble">${formatMsg(p)}</div>`).join('')
+        : '';
+      bubblesHtml = `<div class="msg-bubbles wish-card-bubbles">${renderAttachments(messageAttachments)}${explanationHtml}</div>`;
     } else if (hasVoiceAtt && !displayContent.trim()) {
       // 纯语音消息：不显示文本气泡，只显示语音气泡
       bubblesHtml = `<div class="msg-bubble" style="background:transparent;padding:0;box-shadow:none;border:none">${renderAttachments(messageAttachments)}</div>`;
@@ -1863,6 +1912,42 @@ async function toggleStar(msgId) {
 }
 
 let msgFeedbackPopover = null;
+let msgReasoningPopover = null;
+
+function closeMsgReasoningPopover() {
+  if (msgReasoningPopover) {
+    msgReasoningPopover.remove();
+    msgReasoningPopover = null;
+  }
+}
+
+function openMsgReasoning(ev, msgId) {
+  ev?.stopPropagation?.();
+  closeMsgMenus();
+  closeMsgFeedbackPopover();
+  closeMsgReasoningPopover();
+  const reasoning = currentMessages.find(m => m.id === msgId)?.reasoning_content || '';
+  if (!reasoning.trim()) return;
+  const pop = document.createElement('div');
+  pop.className = 'msg-reasoning-popover';
+  const title = document.createElement('div');
+  title.className = 'msg-reasoning-title';
+  title.textContent = '思考过程';
+  const content = document.createElement('div');
+  content.className = 'msg-reasoning-content';
+  content.textContent = reasoning;
+  pop.append(title, content);
+  document.body.appendChild(pop);
+  msgReasoningPopover = pop;
+  const rect = ev?.currentTarget?.getBoundingClientRect?.();
+  if (rect) {
+    const pad = 8;
+    const width = pop.offsetWidth;
+    const height = pop.offsetHeight;
+    pop.style.left = `${Math.min(Math.max(pad, rect.left), window.innerWidth - width - pad)}px`;
+    pop.style.top = `${rect.bottom + 6 + height <= window.innerHeight - pad ? rect.bottom + 6 : Math.max(pad, rect.top - height - 6)}px`;
+  }
+}
 
 function closeMsgFeedbackPopover() {
   if (msgFeedbackPopover) {
@@ -1990,7 +2075,7 @@ async function jumpToChatMessage(convId, msgId) {
     // 消息不在已加载范围，用 around API 加载
     const msgs = await api("GET", `/api/conversations/${convId}/messages-around/${msgId}?limit=25`);
     if (msgs.length === 0) return;
-    currentMessages = msgs;
+    setCurrentMessages(msgs);
     hasMoreMessages = true;  // 可能上下都有更多消息
     renderMessages();
     requestAnimationFrame(() => {
@@ -2164,7 +2249,7 @@ async function selectConv(id) {
     $("chatTitle").textContent = conv.title;
     $("modelSelect").value = conv.model;
   }
-  currentMessages = await api("GET", `/api/conversations/${id}/messages?limit=${MSG_PAGE_SIZE}`);
+  setCurrentMessages(await api("GET", `/api/conversations/${id}/messages?limit=${MSG_PAGE_SIZE}`));
   // 加载该对话的心语数据
   try {
     const hwList = await api("GET", `/api/heart-whispers/by-conv/${id}`);
@@ -2203,7 +2288,7 @@ async function loadOlderMessages() {
     const older = await api("GET", `/api/conversations/${currentConvId}/messages?limit=${MSG_PAGE_SIZE}&before=${oldest.created_at}`);
     if (older.length === 0) { hasMoreMessages = false; return; }
     hasMoreMessages = older.length >= MSG_PAGE_SIZE;
-    currentMessages = [...older, ...currentMessages];
+    setCurrentMessages([...older, ...currentMessages]);
     renderMessages();
     // 保持滚动位置
     requestAnimationFrame(() => el.scrollTop = el.scrollHeight - prevHeight);
@@ -2291,7 +2376,7 @@ async function send() {
   // 立即显示用户消息（乐观更新）
   playSend();
   const tempUserMsg = { id: "temp_user", conv_id: currentConvId, role: "user", content: text, created_at: Date.now()/1000, attachments };
-  currentMessages.push(tempUserMsg);
+  upsertCurrentMessage(tempUserMsg);
   renderMessages();
 
   _abortController = new AbortController();
@@ -2336,6 +2421,7 @@ async function _processSSEStream(res) {
     const decoder = new TextDecoder();
     let aiMsgId = null;
     let aiContent = "";
+    let aiFinalAlreadyReceived = false;
     let buf = "";
 
     while (true) {
@@ -2350,13 +2436,20 @@ async function _processSSEStream(res) {
           const data = JSON.parse(line.slice(6));
           if (data.type === "start") {
             aiMsgId = data.id;
+            const existing = currentMessages.find(m => m.id === aiMsgId);
+            aiFinalAlreadyReceived = !!(existing && existing.content && existing.content !== "...");
+            if (aiFinalAlreadyReceived) {
+              streamingAiId = null;
+              continue;
+            }
             streamingAiId = aiMsgId;
-            currentMessages.push({ id: aiMsgId, conv_id: currentConvId, role: "assistant", content: "...", created_at: Date.now()/1000 });
+            upsertCurrentMessage({ id: aiMsgId, conv_id: currentConvId, role: "assistant", content: "...", created_at: Date.now()/1000 });
             renderMessages();
             _startTypingAnim(aiMsgId);
           } else if (data.type === "cli_status") {
             _updateTypingStatus(aiMsgId, data.text);
           } else if (data.type === "chunk" || data.type === "replace") {
+            if (aiFinalAlreadyReceived) continue;
             _stopTypingAnim();
             aiContent = data.type === "replace" ? data.content : aiContent + data.content;
             const display = aiContent.replace(/\[CAM_CHECK\]/g, '').replace(/\[POI_SEARCH:[^\]]*\]/g, '').replace(/\[MUSIC:[^\]]*\]/g, '').replace(/\[ALARM:[^\]]*\]/g, '').replace(/\[REMINDER:[^\]]*\]/g, '').replace(/\[Monitor:[^\]]*\]/g, '').replace(/\[SCHEDULE_DEL:[^\]]*\]/g, '').replace(/\[SCHEDULE_LIST\]/g, '').replace(/\[TOY:[^\]]*\]/g, '').replace(/\[HEART:[^\]]*\]/g, '').replace(/\[MEMORY:[^\]]*\]/g, '').replace(/\[查看动态:\d+\]/g, '').replace(/\[视频电话\]/g, '').replace(/\[SELFIE:\s*[^\]]*\]/g, '').replace(/\[DRAW:\s*[^\]]*\]/g, '').replace(/\[SONG\][\s\S]*?\[\/SONG\]/gi, '').replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
@@ -2417,7 +2510,7 @@ async function _processSSEStream(res) {
       }
     }
     if (aiMsgId) finishTTSForMsg(aiMsgId);
-    if (aiMsgId) playRecv();
+    if (aiMsgId && !aiFinalAlreadyReceived) playRecv();
     if ((voiceInCall || (typeof videoCall !== 'undefined' && videoCall.active)) && !ttsEnabled) {
       notifyVoiceAiSpeaking(false);
     }
@@ -2471,7 +2564,7 @@ async function saveEdit(id) {
   if (idx >= 0) currentMessages.splice(idx + 1);
   // 添加临时的 AI 思考中占位
   const tempAiId = 'temp_edit_thinking';
-  currentMessages.push({ id: tempAiId, conv_id: currentConvId, role: 'assistant', content: '...', created_at: Date.now()/1000 });
+  upsertCurrentMessage({ id: tempAiId, conv_id: currentConvId, role: 'assistant', content: '...', created_at: Date.now()/1000 });
   renderMessages();
   _startTypingAnim(tempAiId);
   _abortController = new AbortController();
@@ -2491,7 +2584,7 @@ async function saveEdit(id) {
       _stopTypingAnim();
       // 回滚：从服务器重新加载消息
       const msgs = await api('GET', `/api/conversations/${currentConvId}/messages?limit=${MSG_PAGE_SIZE}`);
-      currentMessages = msgs;
+      setCurrentMessages(msgs);
       renderMessages();
       sending = false;
       _showSendBtn();
@@ -2521,7 +2614,7 @@ async function saveEdit(id) {
             if (tempIdx >= 0) currentMessages.splice(tempIdx, 1);
             aiMsgId = data.id;
             streamingAiId = aiMsgId;
-            currentMessages.push({ id: aiMsgId, conv_id: currentConvId, role: 'assistant', content: '...', created_at: Date.now()/1000 });
+            upsertCurrentMessage({ id: aiMsgId, conv_id: currentConvId, role: 'assistant', content: '...', created_at: Date.now()/1000 });
             renderMessages();
             _startTypingAnim(aiMsgId);
           } else if (data.type === 'cli_status') {
@@ -2656,7 +2749,7 @@ async function regenerateMsg(aiMsgId) {
           if (d.type === "start") {
             newId = d.id;
             streamingAiId = newId;
-            currentMessages.push({ id: newId, conv_id: currentConvId, role: "assistant", content: "...", created_at: Date.now()/1000 });
+            upsertCurrentMessage({ id: newId, conv_id: currentConvId, role: "assistant", content: "...", created_at: Date.now()/1000 });
             renderMessages();
             _startTypingAnim(newId);
           } else if (d.type === "chunk" || d.type === "replace") {
@@ -3008,7 +3101,7 @@ function _showMemoryRecordCard(msgId) {
 function showCamOfflineNotice() {
   const notice = { id: 'notice_cam_' + Date.now(), conv_id: currentConvId, role: 'assistant',
     content: '📷 摄像头未开启，Core无法查看监控信息。请先在设置中开启摄像头。', created_at: Date.now()/1000 };
-  currentMessages.push(notice);
+  upsertCurrentMessage(notice);
   renderMessages();
   scrollBottom();
 }
@@ -3979,7 +4072,7 @@ async function _voiceSendMessage(audioBlob, duration) {
 
   const attachments = [voiceAtt];
   const tempUserMsg = { id: "temp_user", conv_id: currentConvId, role: "user", content: "", created_at: Date.now()/1000, attachments };
-  currentMessages.push(tempUserMsg);
+  upsertCurrentMessage(tempUserMsg);
   renderMessages();
   scrollBottom();
 
@@ -4020,9 +4113,9 @@ function closeMsgMenus() {
   document.querySelectorAll('.msg-menu.show').forEach(m => m.classList.remove('show'));
 }
 document.addEventListener('click', e => {
-  if (!msgFeedbackPopover) return;
-  if (e.target.closest?.('.msg-feedback-popover, .msg-feedback-btn')) return;
+  if (e.target.closest?.('.msg-feedback-popover, .msg-reasoning-popover, .msg-feedback-btn')) return;
   closeMsgFeedbackPopover();
+  closeMsgReasoningPopover();
 });
 
 document.addEventListener('click', () => {
@@ -4084,7 +4177,7 @@ async function fmSave() {
   if (res.ok) {
     alert("保存成功，已同步到对话！");
     if (fmCurrentConvId === currentConvId) {
-      currentMessages = await api("GET", `/api/conversations/${currentConvId}/messages?limit=${MSG_PAGE_SIZE}`);
+      setCurrentMessages(await api("GET", `/api/conversations/${currentConvId}/messages?limit=${MSG_PAGE_SIZE}`));
       hasMoreMessages = currentMessages.length >= MSG_PAGE_SIZE;
       renderMessages();
       conversations = await api("GET", "/api/conversations");
@@ -4635,8 +4728,8 @@ function applySubPageThemeChrome() {
 function resetSubPageChrome() {
   applySubPageThemeChrome();
 }
-function syncSubPageChromeFromFrame() {
-  const frame = $('subPageFrame');
+function syncSubPageChromeFromFrame(frame = activeSubPageFrame) {
+  if (!frame) return;
   const ov = $('subPageOverlay');
   let doc;
   try { doc = frame.contentDocument; } catch(e) { return; }
@@ -4671,36 +4764,85 @@ function syncSubPageMode(url) {
     else window.AionStatusBar.setBarStyle(getSubPageThemeChromeColors().style);
   }
 }
+const persistentSubPageFrames = new Map();
+const transientSubPageFrame = $('subPageFrame');
+let activeSubPageFrame = null;
+
+function subPagePath(url) {
+  try { return new URL(url, location.origin).pathname; } catch(e) { return url || ''; }
+}
+
+function isPersistentSubPage(url) {
+  const path = subPagePath(url);
+  return path === '/' || path === '/chatroom' || path === '/health';
+}
+
+function attachSubPageFrameLoad(frame) {
+  frame.addEventListener('load', () => {
+    if (frame !== activeSubPageFrame || !frame.src || frame.src === 'about:blank') return;
+    requestAnimationFrame(() => {
+      try { syncSubPageMode(frame.contentWindow.location.href); }
+      catch(e) { syncSubPageMode(frame.src); }
+      syncSubPageChromeFromFrame(frame);
+    });
+  });
+}
+
+function getSubPageFrame(url) {
+  const path = subPagePath(url);
+  if (!isPersistentSubPage(path)) {
+    transientSubPageFrame.src = url;
+    return transientSubPageFrame;
+  }
+  let frame = persistentSubPageFrames.get(path);
+  if (!frame) {
+    frame = document.createElement('iframe');
+    frame.className = 'sub-page-frame';
+    frame.setAttribute('sandbox', 'allow-same-origin allow-scripts allow-forms allow-popups allow-modals');
+    frame.dataset.persistentPath = path;
+    attachSubPageFrameLoad(frame);
+    $('subPageFrames').appendChild(frame);
+    persistentSubPageFrames.set(path, frame);
+    frame.src = url;
+  }
+  return frame;
+}
+
+attachSubPageFrameLoad(transientSubPageFrame);
+
 function openSubPage(url) {
   closeSidebar();
   syncSubPageMode(url);
-  const f = $('subPageFrame');
-  f.src = url;
+  const frame = getSubPageFrame(url);
+  document.querySelectorAll('.sub-page-frame').forEach(item => {
+    item.style.display = item === frame ? 'block' : 'none';
+  });
+  activeSubPageFrame = frame;
+  if (subPagePath(url) === '/') {
+    try {
+      frame.contentDocument?.getElementById('screen')?.classList.remove('navigating');
+    } catch(e) {}
+  }
   $('subPageOverlay').classList.add('show');
   currentSubPage = url;
 }
-document.getElementById('subPageFrame').addEventListener('load', () => {
-  const f = $('subPageFrame');
-  if (!f.src || f.src === 'about:blank') return;
-  requestAnimationFrame(() => {
-    try { syncSubPageMode(f.contentWindow.location.href); }
-    catch(e) { syncSubPageMode(f.src); }
-    syncSubPageChromeFromFrame();
-  });
-});
 function closeSubPage(skipReload = false) {
   const ov = $('subPageOverlay');
   if (!ov.classList.contains('show')) return;
   ov.classList.remove('show');
   ov.classList.remove('home-subpage');
   ov.classList.remove('immersive-subpage');
-  $('subPageFrame').src = 'about:blank';
+  if (activeSubPageFrame === transientSubPageFrame) {
+    transientSubPageFrame.src = 'about:blank';
+  }
+  if (activeSubPageFrame) activeSubPageFrame.style.display = 'none';
+  activeSubPageFrame = null;
   currentSubPage = null;
   applyAionTheme(localStorage.getItem('aion_chat_theme') || document.body.dataset.theme || 'dark');
   // 回到聊天页后重新加载消息列表（拿到后台生成完成的新消息）
   if (!skipReload && currentConvId) {
     api("GET", `/api/conversations/${currentConvId}/messages?limit=${MSG_PAGE_SIZE}`).then(msgs => {
-      currentMessages = msgs;
+      setCurrentMessages(msgs);
       hasMoreMessages = msgs.length >= MSG_PAGE_SIZE;
       renderMessages();
     });
@@ -4712,9 +4854,7 @@ function navigateToHome() {
     try { return new URL(currentSubPage || '', location.origin).pathname; } catch(e) { return currentSubPage || ''; }
   })();
   if (path === '/') return; // 已经在 Home
-  // 直接切换 iframe src，旧页面保持显示直到 Home 加载完成
-  $('subPageFrame').src = '/';
-  currentSubPage = '/';
+  openSubPage('/');
 }
 // Android 原生返回键回调
 function handleNativeBack() {

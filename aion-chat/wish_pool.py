@@ -334,6 +334,27 @@ async def draw_wish(author: str = "all", drawer: str = "") -> dict[str, Any] | N
     return wish
 
 
+async def draw_specific_wish(wish_id: str) -> dict[str, Any] | None:
+    """Pull one explicitly selected active wish from the pool."""
+    await ensure_wish_schema()
+    now = _now()
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "UPDATE wishes SET pulled_count=COALESCE(pulled_count,0)+1, "
+            "last_pulled_at=?, updated_at=? WHERE id=? AND status='active'",
+            (now, now, wish_id),
+        )
+        await db.commit()
+        if cur.rowcount == 0:
+            return None
+        cur = await db.execute("SELECT * FROM wishes WHERE id=?", (wish_id,))
+        row = await cur.fetchone()
+    wish = serialize_wish(row)
+    await manager.broadcast({"type": "wish_pulled", "data": wish})
+    return wish
+
+
 async def update_wish(wish_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
     await ensure_wish_schema()
     allowed_fields = []

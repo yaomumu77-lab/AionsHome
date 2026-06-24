@@ -8,21 +8,24 @@
 <link rel="apple-touch-icon" href="/public/icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#2a221e">
+<meta name="theme-color" content="#050923">
 <style>
 :root {
-  --bg: #1e1a16;
-  --surface: #2a221e;
-  --surface2: #362e28;
-  --border: #4a3f37;
-  --text: #e8ddd4;
-  --text2: #a89888;
-  --text3: #7a6b5d;
-  --accent: #c8956c;
-  --accent2: #a87a55;
-  --user-bg: #3d2e24;
-  --ai-bg: #2a3328;
-  --danger: #cf5555;
+  --bg: #050923;
+  --surface: rgba(10, 15, 48, 0.64);
+  --surface2: rgba(31, 39, 101, 0.48);
+  --surface3: rgba(78, 92, 186, 0.22);
+  --border: rgba(141, 151, 255, 0.34);
+  --border-strong: rgba(159, 120, 255, 0.62);
+  --text: #f5f7ff;
+  --text2: #c5c9ef;
+  --text3: #8f97cf;
+  --accent: #8e6cff;
+  --accent2: #39a7ff;
+  --accent3: #ef8dff;
+  --user-bg: rgba(123, 72, 218, 0.68);
+  --ai-bg: rgba(20, 64, 139, 0.62);
+  --danger: #ff5c8a;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 html, body { height:100%; }
@@ -56,7 +59,7 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
 /* ── 聊天区 ── */
 .chat-area { flex:1; display: flex; flex-direction: column; min-width: 0; position: relative; }
 
-.chat-header { padding: 10px 16px; padding-top: calc(10px + env(safe-area-inset-top)); border-bottom: 1px solid rgba(74,63,55,0.6); background: rgba(42,34,30,0.85); backdrop-filter: blur(20px) saturate(1.6); -webkit-backdrop-filter: blur(20px) saturate(1.6); display: flex; align-items: center; gap: 10px; min-height: 48px; position: absolute; top: 0; left: 0; right: 0; z-index: 8; box-shadow: 0 1px 8px rgba(0,0,0,0.2); }
+.chat-header { padding: 10px 16px; padding-top: calc(10px + env(safe-area-inset-top)); border-bottom: 1px solid var(--border); background: rgba(9, 13, 43, 0.58); backdrop-filter: blur(20px) saturate(1.6); -webkit-backdrop-filter: blur(20px) saturate(1.6); display: flex; align-items: center; gap: 10px; min-height: 48px; position: absolute; top: 0; left: 0; right: 0; z-index: 8; box-shadow: inset 0 -1px 0 rgba(255,255,255,0.06); }
 .chat-header .menu-btn { display: none; background: none; border: none; color: var(--text); font-size: 22px; cursor: pointer; padding: 4px; }
 .chat-header .title { flex:1; font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: var(--text); }
 .chat-header select { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px; outline: none; }
@@ -138,8 +141,8 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
 .msg-menu button:hover { background:var(--surface2); }
 
 .msg-bubble { padding: 10px 14px; border-radius: 14px; font-size: 15px; line-height: 1.65; word-break: break-word; font-weight: 450; }
-.msg-row.user .msg-bubble { background: linear-gradient(145deg, #4a352a 0%, #3d2e24 100%); color: #e8ddd4; border-top-right-radius: 4px; border: 1px solid rgba(200,149,108,0.25); box-shadow: inset 0 2px 4px rgba(255,255,255,0.04), 0 1px 3px rgba(0,0,0,0.2); }
-.msg-row.assistant .msg-bubble { background: linear-gradient(145deg, #2e3a2a 0%, #2a3328 100%); color: #dde8d4; border-top-left-radius: 4px; border: 1px solid rgba(138,184,122,0.2); box-shadow: inset 0 2px 4px rgba(255,255,255,0.03), 0 1px 3px rgba(0,0,0,0.2); }
+.msg-row.user .msg-bubble { background: linear-gradient(180deg, rgba(131, 80, 226, 0.32), rgba(77, 45, 158, 0.30)); color: var(--text); border-top-right-radius: 4px; border: 1px solid rgba(210, 142, 255, 0.52); box-shadow: inset 0 1px 1px rgba(255,255,255,0.18), inset 0 -10px 28px rgba(54,20,110,0.12), 0 0 24px rgba(147, 91, 255, 0.22), 0 10px 30px rgba(0,0,0,0.16); }
+.msg-row.assistant .msg-bubble { background: linear-gradient(180deg, rgba(37, 92, 183, 0.28), rgba(17, 41, 103, 0.26)); color: var(--text); border-top-left-radius: 4px; border: 1px solid rgba(108, 177, 255, 0.44); box-shadow: inset 0 1px 1px rgba(255,255,255,0.16), inset 0 -10px 26px rgba(9,16,48,0.10), 0 10px 28px rgba(0,0,0,0.16); }
 .msg-bubbles { display:flex; flex-direction:column; gap:3px; }
 
 .msg-bubble.editing { background:var(--surface2) !important; }
@@ -297,7 +300,7 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
 <!-- Toast -->
 <div class="toast-msg" id="toast"></div>
 
-<script src="/static/theme.js?v=theme-20260606"></script>
+<script src="/static/theme.js?v=theme-20260621-theater"></script>
 <script>
 /* ══════════════════════════════════════════════════
    小剧场 — 独立聊天功能，不涉及记忆库
@@ -323,6 +326,13 @@ let ttsQueue = new Map();
 let ttsMergedUrls = new Map();
 let ttsPlaying = false;
 let currentAudio = null;
+let manualReplay = null;
+let ttsPlaybackActiveAt = Date.now() / 1000;
+const theaterClientId = localStorage.getItem('theater_client_id') || (() => {
+  const id = `theater_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  localStorage.setItem('theater_client_id', id);
+  return id;
+})();
 
 /* ── API 封装 ── */
 async function api(method, url, body) {
@@ -358,8 +368,17 @@ async function init() {
   } catch(e) { models = []; }
   populateModelSelects();
 
+  var savedCtx = localStorage.getItem('theater_context_limit');
+  if (savedCtx) { $('contextSlider').value = savedCtx; $('contextVal').textContent = savedCtx; }
+  var savedTemp = localStorage.getItem('theater_temperature');
+  if (savedTemp) { $('tempSlider').value = savedTemp; $('tempVal').textContent = savedTemp; }
+  var savedTts = localStorage.getItem('theater_tts_enabled');
+  if (savedTts === 'true') { ttsEnabled = true; $('ttsToggle').checked = true; }
+  var savedVoice = localStorage.getItem('theater_tts_voice');
+  if (savedVoice) ttsVoice = savedVoice;
+
   // 加载 TTS 音色列表
-  loadTTSVoices();
+  await loadTTSVoices();
 
   // 加载角色
   personas = await api('GET', '/api/theater/personas');
@@ -368,16 +387,6 @@ async function init() {
   // 加载对话列表
   conversations = await api('GET', '/api/theater/conversations');
   renderConvList();
-
-  // 恢复设置
-  const savedCtx = localStorage.getItem('theater_context_limit');
-  if (savedCtx) { $('contextSlider').value = savedCtx; $('contextVal').textContent = savedCtx; }
-  const savedTemp = localStorage.getItem('theater_temperature');
-  if (savedTemp) { $('tempSlider').value = savedTemp; $('tempVal').textContent = savedTemp; }
-  const savedTts = localStorage.getItem('theater_tts_enabled');
-  if (savedTts === 'true') { ttsEnabled = true; $('ttsToggle').checked = true; }
-  const savedVoice = localStorage.getItem('theater_tts_voice');
-  if (savedVoice) ttsVoice = savedVoice;
 
   // 自动选择第一个对话
   if (conversations.length) selectConv(conversations[0].id);
@@ -421,20 +430,49 @@ async function loadTTSVoices() {
 function toggleTTS() {
   ttsEnabled = $('ttsToggle').checked;
   localStorage.setItem('theater_tts_enabled', ttsEnabled);
+  ttsPlaybackActiveAt = Date.now() / 1000;
   sendTTSState();
+  if (!ttsEnabled) stopTTSPlayback();
 }
 
 function changeTTSVoice() {
   ttsVoice = $('ttsVoiceSelect').value;
   localStorage.setItem('theater_tts_voice', ttsVoice);
+  ttsPlaybackActiveAt = Date.now() / 1000;
   sendTTSState();
 }
 
 function sendTTSState() {
   if (_ws && _ws.readyState === WebSocket.OPEN) {
-    _ws.send(JSON.stringify({ type: 'tts_state', enabled: ttsEnabled, voice: ttsVoice }));
+    _ws.send(JSON.stringify({
+      type: 'tts_state',
+      enabled: ttsEnabled && !!ttsVoice,
+      voice: ttsVoice,
+      can_play: true,
+      active_at: ttsPlaybackActiveAt,
+      client_id: theaterClientId
+    }));
   }
 }
+
+let ttsPlaybackStateLastSent = 0;
+function bumpTTSPlaybackState() {
+  const now = Date.now();
+  if (now - ttsPlaybackStateLastSent < 1000) return;
+  ttsPlaybackStateLastSent = now;
+  ttsPlaybackActiveAt = now / 1000;
+  sendTTSState();
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') bumpTTSPlaybackState();
+  else sendTTSState();
+});
+window.addEventListener('focus', bumpTTSPlaybackState);
+window.addEventListener('pageshow', bumpTTSPlaybackState);
+window.addEventListener('pagehide', sendTTSState);
+document.addEventListener('pointerdown', bumpTTSPlaybackState, { passive: true });
+document.addEventListener('keydown', bumpTTSPlaybackState);
 
 /* ── WebSocket ── */
 let _ws = null;
@@ -444,7 +482,8 @@ function connectWS() {
   _ws = new WebSocket(`${proto}//${location.host}/ws`);
   _ws.onopen = () => {
     clearInterval(_wsReconnectTimer);
-    if (ttsEnabled) sendTTSState();
+    _ws.send(JSON.stringify({ type: 'register_client', client_id: theaterClientId }));
+    sendTTSState();
   };
   _ws.onmessage = e => {
     try { handleSync(JSON.parse(e.data)); } catch(err) {}
@@ -826,7 +865,6 @@ async function send() {
             const display = aiText.replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
             row.innerHTML = `<div class="msg-bubble">${escHtml(display).replace(/\n/g, '<br>')}</div>`;
           }
-          scrollBottom();
         }
 
         if (data.type === 'debug') {
@@ -888,7 +926,6 @@ async function regenerateMsg() {
               <span class="typing-dots"><span></span><span></span><span></span></span>
             </div></div>`;
           }
-          scrollBottom();
         }
 
         if (data.type === 'chunk' && aiMsgId) {
@@ -900,7 +937,6 @@ async function regenerateMsg() {
             const display = aiText.replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
             row.innerHTML = `<div class="msg-bubble">${escHtml(display).replace(/\n/g, '<br>')}</div>`;
           }
-          scrollBottom();
         }
       }
     }
@@ -995,8 +1031,12 @@ function handleTTSChunk(d) {
   // 只播放小剧场自己的消息（tm_ 前缀），忽略主聊天的 TTS
   if (!msgId.startsWith('tm_')) return;
   if (!ttsQueue.has(msgId)) ttsQueue.set(msgId, []);
-  ttsQueue.get(msgId).push({ seq: d.seq, url: d.url });
-  ttsQueue.get(msgId).sort((a, b) => a.seq - b.seq);
+  upsertTTSChunk(ttsQueue.get(msgId), d.seq, d.url);
+  if (manualReplay && manualReplay.msgId === msgId) {
+    upsertTTSChunk(manualReplay.chunks, d.seq, d.url);
+    if (!ttsPlaying) playManualReplayNext();
+    return;
+  }
   if (!ttsPlaying) playNextTTS();
 }
 
@@ -1007,7 +1047,29 @@ function handleTTSDone(d) {
     const q = ttsQueue.get(msgId);
     q._done = true;
   }
+  if (manualReplay && manualReplay.msgId === msgId) {
+    manualReplay.done = true;
+    if (!ttsPlaying) playManualReplayNext();
+    return;
+  }
   if (!ttsPlaying) playNextTTS();
+}
+
+function upsertTTSChunk(chunks, seq, url) {
+  if (!chunks.find(c => c.seq === seq)) chunks.push({ seq, url });
+  chunks.sort((a, b) => a.seq - b.seq);
+}
+
+function stopTTSPlayback() {
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.src = '';
+    currentAudio = null;
+  }
+  ttsPlaying = false;
+  manualReplay = null;
+  ttsQueue.clear();
+  document.querySelectorAll('.tts-replay-btn.playing').forEach(btn => btn.classList.remove('playing'));
 }
 
 function playNextTTS() {
@@ -1032,7 +1094,10 @@ function playNextTTS() {
         if (btn) btn.classList.remove('playing');
         playNextTTS();
       };
-      audio.play().catch(() => { ttsPlaying = false; });
+      audio.play().catch(() => {
+        chunks._played = Math.max(0, chunks._played - 1);
+        ttsPlaying = false;
+      });
       return;
     }
     if (chunks._done && chunks._played >= chunks.length) {
@@ -1043,12 +1108,22 @@ function playNextTTS() {
 }
 
 async function replayTTS(msgId) {
+  const activeBtn = document.querySelector(`.msg-row[data-id="${msgId}"] .tts-replay-btn.playing`);
+  if (activeBtn && manualReplay && manualReplay.msgId === msgId) {
+    stopTTSPlayback();
+    return;
+  }
+
   const safeId = msgId.replace(/[^a-zA-Z0-9_\-]/g, '');
   const chunks = [];
   const mergedUrl = ttsMergedUrls.get(msgId) || `/api/theater/tts/audio/${safeId}`;
+  let usingMerged = false;
   try {
     const mergedRes = await fetch(mergedUrl, { method: 'HEAD' });
-    if (mergedRes.ok) chunks.push(mergedUrl);
+    if (mergedRes.ok) {
+      chunks.push(mergedUrl);
+      usingMerged = true;
+    }
   } catch(e) {}
 
   let misses = 0;
@@ -1067,25 +1142,60 @@ async function replayTTS(msgId) {
       } catch(e) { break; }
     }
   }
-  if (!chunks.length) { showToast('暂无音频缓存'); return; }
+  const liveQueue = ttsQueue.get(msgId);
+  if (liveQueue && !usingMerged) {
+    for (const chunk of liveQueue) {
+      if (!chunks.includes(chunk.url)) chunks.push(chunk.url);
+    }
+  }
+  const isLive = !!liveQueue && !liveQueue._done;
+  if (!chunks.length && !isLive) { showToast('暂无音频缓存'); return; }
   // 停止当前播放
   if (currentAudio) { currentAudio.pause(); currentAudio = null; }
   ttsPlaying = false;
-  ttsQueue.clear();
-  // 播放
-  let idx = 0;
+  manualReplay = {
+    msgId,
+    chunks: chunks.map((url, seq) => ({ seq, url })),
+    index: 0,
+    done: !isLive
+  };
+  if (liveQueue && liveQueue._done) manualReplay.done = true;
+  playManualReplayNext();
+}
+
+function playManualReplayNext() {
+  if (!manualReplay) return;
+  const { msgId, chunks } = manualReplay;
   const btn = document.querySelector(`.msg-row[data-id="${msgId}"] .tts-replay-btn`);
-  function playNext() {
-    if (idx >= chunks.length) { if (btn) btn.classList.remove('playing'); ttsPlaying = false; return; }
-    ttsPlaying = true;
-    if (btn) btn.classList.add('playing');
-    const audio = new Audio(chunks[idx++]);
-    currentAudio = audio;
-    audio.onended = playNext;
-    audio.onerror = playNext;
-    audio.play().catch(() => { ttsPlaying = false; });
+  if (manualReplay.index >= chunks.length) {
+    if (manualReplay.done) {
+      if (btn) btn.classList.remove('playing');
+      ttsPlaying = false;
+      manualReplay = null;
+    } else {
+      ttsPlaying = false;
+      if (btn) btn.classList.add('playing');
+    }
+    return;
   }
-  playNext();
+  ttsPlaying = true;
+  if (btn) btn.classList.add('playing');
+  const audio = new Audio(chunks[manualReplay.index++].url);
+  currentAudio = audio;
+  audio.onended = () => {
+    currentAudio = null;
+    ttsPlaying = false;
+    playManualReplayNext();
+  };
+  audio.onerror = () => {
+    currentAudio = null;
+    ttsPlaying = false;
+    playManualReplayNext();
+  };
+  audio.play().catch(() => {
+    manualReplay.index = Math.max(0, manualReplay.index - 1);
+    ttsPlaying = false;
+  });
 }
 
 /* ── 角色管理 ── */

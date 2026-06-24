@@ -9,8 +9,13 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#ff8359">
 <style>
+.sub-page { overflow:hidden; }
+.page-content { display:flex; flex-direction:column; min-height:0; overflow:hidden; padding-bottom:calc(18px + env(safe-area-inset-bottom)); }
 .mem-search { width:100%; background:var(--surface2); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:8px 10px; font-size:13px; outline:none; margin-bottom:8px; box-sizing:border-box; }
-.mem-list { flex:1; overflow-y:auto; max-height:calc(100dvh - 320px); border:1px solid var(--border); border-radius:8px; background:var(--bg); padding:4px; }
+.mem-tabs { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-bottom:8px; }
+.mem-tab { border:1px solid var(--border); background:var(--surface2); color:var(--text2); border-radius:6px; padding:6px 8px; font-size:12px; cursor:pointer; font-weight:600; }
+.mem-tab.active { border-color:var(--accent); background:rgba(126,87,194,0.16); color:var(--accent); }
+.mem-list { flex:1; min-height:0; overflow-y:auto; max-height:none; border:1px solid var(--border); border-radius:8px; background:var(--bg); padding:4px; }
 .mem-entry { padding:8px 10px; border-bottom:1px solid var(--border); font-size:13px; line-height:1.5; display:flex; align-items:flex-start; gap:8px; }
 .mem-entry:last-child { border-bottom:none; }
 .mem-entry.mem-return-focus { background:rgba(74,144,226,0.12); }
@@ -39,11 +44,13 @@
 .btn-digest { background:#2e7d32; color:#fff; border:none; border-radius:6px; padding:6px 14px; font-size:13px; cursor:pointer; font-weight:600; white-space:nowrap; }
 .btn-digest:hover { background:#388e3c; }
 .btn-digest:disabled { background:var(--surface2); color:var(--text3); cursor:not-allowed; }
+.memory-actions-row { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; margin-top:8px; flex-shrink:0; }
+.memory-actions-row .btn-digest { min-width:0; width:100%; padding:7px 5px; white-space:normal; line-height:1.25; }
 .digest-status { margin-top:8px; padding:8px 12px; border-radius:6px; font-size:12px; line-height:1.5; }
 .digest-status.success { background:#e8f5e9; color:#2e7d32; }
 .digest-status.info { background:#e3f2fd; color:#1565c0; }
 .digest-status.error { background:#fce4ec; color:#c62828; }
-.compress-review { margin-top:8px; border:1px solid var(--border); border-radius:8px; background:var(--surface); padding:10px; font-size:12px; line-height:1.45; }
+.compress-review { margin-top:8px; max-height:40vh; overflow-y:auto; flex-shrink:0; border:1px solid var(--border); border-radius:8px; background:var(--surface); padding:10px; font-size:12px; line-height:1.45; }
 .compress-review-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; }
 .compress-review-title { font-weight:700; color:var(--text); }
 .compress-review-status { color:var(--text3); font-size:11px; }
@@ -56,6 +63,16 @@
 .compress-item:last-child { border-bottom:none; }
 .compress-item-meta { display:flex; gap:6px; flex-wrap:wrap; color:var(--text3); font-size:10px; margin-top:3px; }
 .compress-item-reason { color:var(--text3); font-size:11px; margin-top:3px; }
+.compress-edit { display:grid; gap:6px; margin-top:6px; }
+.compress-edit textarea,
+.compress-edit input,
+.compress-edit select { width:100%; box-sizing:border-box; border:1px solid var(--border); border-radius:5px; background:var(--surface2); color:var(--text); padding:5px 7px; font-size:12px; }
+.compress-edit textarea { min-height:58px; resize:vertical; }
+.compress-edit-row { display:grid; grid-template-columns:1fr 90px 90px; gap:6px; }
+.compress-mini-actions { display:flex; gap:6px; justify-content:flex-end; margin-top:4px; }
+.compress-mini-actions button { border:1px solid var(--border); background:var(--surface2); color:var(--text2); border-radius:5px; padding:3px 8px; font-size:11px; cursor:pointer; }
+.compress-old-toggle { display:flex; gap:8px; align-items:flex-start; }
+.compress-old-toggle input { margin-top:3px; }
 .compress-review-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:10px; }
 .compress-review-actions button { border:none; border-radius:5px; padding:5px 12px; font-size:12px; cursor:pointer; font-weight:600; }
 .compress-discard-btn { background:var(--surface2); color:var(--text2); border:1px solid var(--border) !important; }
@@ -92,9 +109,13 @@
   .mem-add-row input { flex-basis:100%; }
   .mem-add-row select { flex:1; }
   .anchor-row { flex-wrap:nowrap; gap:6px; overflow-x:auto; }
+  .page-content { padding:10px 12px calc(20px + env(safe-area-inset-bottom)); }
+  .memory-actions-row { margin-inline:4px; }
+  .memory-actions-row .btn-digest { font-size:12px; }
 }
 /* 聚焦编辑模式 */
 .editing-focus .mem-search,
+.editing-focus .mem-tabs,
 .editing-focus .mem-count,
 .editing-focus .mem-add-row,
 .editing-focus .anchor-row,
@@ -116,6 +137,11 @@
   </div>
   <div class="page-content">
     <input class="mem-search" id="memSearch" type="text" placeholder="🔍 搜索记忆..." oninput="filterMemories()">
+    <div class="mem-tabs" role="tablist" aria-label="记忆分类">
+      <button class="mem-tab active" data-kind="all" onclick="setMemoryKindFilter('all')">全部</button>
+      <button class="mem-tab" data-kind="daily" onclick="setMemoryKindFilter('daily')">日常</button>
+      <button class="mem-tab" data-kind="long_term" onclick="setMemoryKindFilter('long_term')">长期重要</button>
+    </div>
     <div class="mem-count" id="memCount"></div>
     <div class="mem-list" id="memList"><div class="mem-empty">暂无记忆</div></div>
     <div class="mem-add-row">
@@ -136,7 +162,7 @@
       <button class="anchor-reset-btn" onclick="resetAnchor()">回退</button>
     </div>
     <div class="digest-status" id="digestStatus" style="display:none"></div>
-    <div class="btn-row">
+    <div class="btn-row memory-actions-row">
       <button class="btn-digest" id="compressDailyBtn" onclick="compressDailyMemories()" style="background:#6a4c93">🗜️ 生成压缩草稿</button>
       <button class="btn-digest" id="digestBtn" onclick="triggerDigest()">📝 总结新记忆</button>
       <button class="btn-digest" id="rebuildBtn" onclick="rebuildEmbeddings()" style="background:#1565c0">🔄 重建向量索引</button>
@@ -175,12 +201,31 @@ let _allMemories = [];
 let _sourceMemId = null;
 let _sourceMessages = [];
 let _dailyCompressReview = null;
+let _memoryKindFilter = "all";
 
 function memoryKind(m) {
   return m.memory_kind || (SUMMARY_MEMORY_TYPES.has(String(m.type || '').toLowerCase()) ? 'daily' : 'long_term');
 }
 function memoryKindLabel(m) {
   return m.memory_kind_label || (memoryKind(m) === 'daily' ? '日常' : '长期重要');
+}
+function fmtMemoryOccurrence(m) {
+  if (m.memory_time_label) return m.memory_time_label;
+  const start = Number(m.source_start_ts || 0);
+  const end = Number(m.source_end_ts || 0);
+  const created = Number(m.created_at || 0);
+  const fmt = ts => new Date(ts * 1000).toLocaleString("zh-CN", {year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"});
+  if (start > 0) {
+    if (end > 0 && Math.abs(end - start) >= 60) {
+      const sameDay = new Date(start * 1000).toDateString() === new Date(end * 1000).toDateString();
+      const endText = sameDay
+        ? new Date(end * 1000).toLocaleTimeString("zh-CN", {hour:"2-digit",minute:"2-digit"})
+        : fmt(end);
+      return `发生：${fmt(start)}-${endText}`;
+    }
+    return `发生：${fmt(start)}`;
+  }
+  return created > 0 ? `记录：${fmt(created)}` : "";
 }
 function typeForMemoryKind(currentType, selectedKind) {
   const current = String(currentType || '').toLowerCase();
@@ -213,23 +258,39 @@ async function loadMemories() {
 
 function filterMemories() { renderMemories(); }
 
+function setMemoryKindFilter(kind) {
+  _memoryKindFilter = kind || "all";
+  document.querySelectorAll(".mem-tab").forEach(btn => {
+    const active = btn.dataset.kind === _memoryKindFilter;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  renderMemories();
+}
+
 function renderMemories() {
   const query = ($("memSearch").value || "").toLowerCase();
+  const kindFiltered = _memoryKindFilter === "all"
+    ? _allMemories
+    : _allMemories.filter(m => memoryKind(m) === _memoryKindFilter);
   const filtered = query
-    ? _allMemories.filter(m => (
+      ? kindFiltered.filter(m => (
         m.content.toLowerCase().includes(query) ||
         (MEM_TYPE_LABELS[m.type]||"").includes(query) ||
         memoryKindLabel(m).includes(query)
       ))
-    : _allMemories;
-  $("memCount").textContent = `共 ${_allMemories.length} 条记忆` + (query ? `，筛选出 ${filtered.length} 条` : "");
+    : kindFiltered;
+  const filterText = _memoryKindFilter === "daily" ? "日常" : (_memoryKindFilter === "long_term" ? "长期重要" : "");
+  $("memCount").textContent = `共 ${_allMemories.length} 条记忆`
+    + (filterText ? `，${filterText} ${kindFiltered.length} 条` : "")
+    + ((query || filterText) ? `，当前显示 ${filtered.length} 条` : "");
   const el = $("memList");
   if (!filtered.length) { el.innerHTML = '<div class="mem-empty">暂无记忆</div>'; return; }
   el.innerHTML = filtered.map(m => {
     const typeLabel = MEM_TYPE_LABELS[m.type] || m.type;
     const kindLabel = memoryKindLabel(m);
     const kindClass = memoryKind(m) === 'daily' ? 'kind-daily' : 'kind-long-term';
-    const timeStr = m.created_at ? new Date(m.created_at * 1000).toLocaleString("zh-CN", {month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}) : "";
+    const timeStr = fmtMemoryOccurrence(m);
     const hasSource = Number(m.source_count || 0) > 0;
     const sourceBtn = hasSource ? `<button class="mem-source-btn" onclick="viewSource('${escHtml(m.id)}')" title="查看原文">📜</button>` : '';
     let kwDisplay = '';
@@ -243,7 +304,7 @@ function renderMemories() {
       <div class="mem-left"><span class="mem-type ${kindClass}" title="${escHtml(typeLabel)}">${escHtml(kindLabel)}</span>${impDisplay}</div>
       <div style="flex:1;min-width:0">
         <div class="mem-content" id="mc_${escHtml(m.id)}">${escHtml(m.content)}</div>
-        <div class="mem-meta">${kwDisplay}<span class="mem-time">${escHtml(timeStr)}</span></div>
+        <div class="mem-meta">${kwDisplay}${timeStr ? `<span class="mem-time">${escHtml(timeStr)}</span>` : ''}</div>
       </div>
       <div class="mem-actions">
         <button class="${pinClass}" onclick="toggleUnresolved('${escHtml(m.id)}')" title="标记待办">📌</button>
@@ -415,14 +476,14 @@ async function compressDailyMemories() {
     statusEl.textContent = "已经有一份压缩草稿，先确认应用或废弃它。";
     return;
   }
-  if (!confirm("将为主记忆库中超过 14 天的日常记忆生成压缩草稿；这一步不会修改记忆库。继续？")) return;
+  if (!confirm("将按 15-90 天、90-180 天、180-365 天、365 天以上分阶段生成压缩草稿；这一步不会修改记忆库。继续？")) return;
   btn.disabled = true;
   btn.textContent = "生成中...";
   statusEl.style.display = "block";
   statusEl.className = "digest-status info";
   statusEl.textContent = "正在让当前主模型整理主记忆库的旧日常记忆草稿，请稍候...";
   try {
-    const result = await api("POST", "/api/memories/compress-daily", { target: "main", days: 14 });
+    const result = await api("POST", "/api/memories/compress-daily", { target: "main", days: 15 });
     _dailyCompressReview = result.review || null;
     renderDailyCompressionReview();
     const counts = _dailyCompressReview?.counts || {};
@@ -463,30 +524,213 @@ function fmtDraftTime(ts) {
   return d.toLocaleString("zh-CN", {month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"});
 }
 
-function renderCompressItem(item, kindLabel) {
+function draftBatches(key) {
+  return (_dailyCompressReview?.payload?.[key]?.batches) || [];
+}
+
+function draftCoveredSet(batch) {
+  const ids = new Set(batch.covered_ids || []);
+  (batch.discard_memory_ids || []).forEach(id => ids.add(id));
+  ["compressed_daily", "important_memories"].forEach(field => {
+    (batch[field] || []).forEach(item => (item.source_memory_ids || []).forEach(id => ids.add(id)));
+  });
+  return ids;
+}
+
+function refreshDraftBatch(batch) {
+  const oldIds = new Set((batch.old_rows || []).map(row => row.id).filter(Boolean));
+  const covered = Array.from(draftCoveredSet(batch)).filter(id => !oldIds.size || oldIds.has(id));
+  batch.covered_ids = covered;
+  batch.remaining = Math.max(0, Number(batch.input_count || 0) - covered.length);
+}
+
+function refreshDraftPayload() {
+  ["main", "chatroom"].forEach(key => draftBatches(key).forEach(refreshDraftBatch));
+}
+
+function setDraftItemValue(area, batchIndex, field, itemIndex, prop, value) {
+  const item = draftBatches(area)?.[batchIndex]?.[field]?.[itemIndex];
+  if (!item) return;
+  if (prop === "keywords") item[prop] = parseKeywordText(value);
+  else if (prop === "importance" || prop === "compression_stage") item[prop] = Number(value || 0);
+  else item[prop] = value;
+}
+
+function removeDraftItem(area, batchIndex, field, itemIndex) {
+  const items = draftBatches(area)?.[batchIndex]?.[field];
+  if (!items) return;
+  items.splice(itemIndex, 1);
+  refreshDraftPayload();
+  renderDailyCompressionReview();
+}
+
+function addDraftItem(area, field) {
+  const batches = draftBatches(area);
+  if (!batches.length) return;
+  const batch = batches[0];
+  const now = Math.floor(Date.now() / 1000);
+  const item = {
+    content: "",
+    source_memory_ids: [],
+    source_msg_ids: [],
+    keywords: [],
+    importance: field === "important_memories" ? 0.8 : 0.25,
+    memory_time: batch.old_rows?.[0]?.source_start_ts || batch.old_rows?.[0]?.created_at || now,
+    source_start_ts: batch.old_rows?.[0]?.source_start_ts || batch.old_rows?.[0]?.created_at || now,
+    source_end_ts: batch.old_rows?.[0]?.source_end_ts || batch.old_rows?.[0]?.created_at || now,
+    memory_kind: field === "important_memories" ? "long_term" : "daily",
+    memory_type: field === "important_memories" ? "important" : "daily",
+    compression_stage: field === "important_memories" ? 0 : Number(batch.output_stage || 1),
+    retain_source_detail: batch.retain_source_detail ?? (Number(batch.output_stage || 1) < 3),
+    reason: "用户手动添加"
+  };
+  batch[field] = batch[field] || [];
+  batch[field].push(item);
+  renderDailyCompressionReview();
+}
+
+function setOldRowCovered(area, batchIndex, memId, covered) {
+  const batch = draftBatches(area)?.[batchIndex];
+  if (!batch || !memId) return;
+  batch.discard_memory_ids = (batch.discard_memory_ids || []).filter(id => id !== memId);
+  batch.covered_ids = (batch.covered_ids || []).filter(id => id !== memId);
+  if (covered) {
+    batch.discard_memory_ids.push(memId);
+  } else {
+    ["compressed_daily", "important_memories"].forEach(field => {
+      (batch[field] || []).forEach(item => {
+        item.source_memory_ids = (item.source_memory_ids || []).filter(id => id !== memId);
+      });
+    });
+  }
+  refreshDraftBatch(batch);
+  renderDailyCompressionReview();
+}
+
+async function saveDailyCompressionDraft(silent = false) {
+  if (!_dailyCompressReview?.id) return null;
+  refreshDraftPayload();
+  const result = await api("PATCH", `/api/memories/compress-daily/${_dailyCompressReview.id}`, {
+    payload: _dailyCompressReview.payload
+  });
+  if (!result.ok) throw new Error(result.message || "保存草稿失败");
+  _dailyCompressReview = result.review || _dailyCompressReview;
+  renderDailyCompressionReview();
+  if (!silent) {
+    const statusEl = $("digestStatus");
+    statusEl.style.display = "block";
+    statusEl.className = "digest-status success";
+    statusEl.textContent = result.message || "草稿已保存";
+  }
+  return result;
+}
+
+function renderCompressItem(item, kindLabel, area, batchIndex, field, itemIndex) {
   const kws = Array.isArray(item.keywords) ? item.keywords : parseKeywordText(item.keywords);
   const sourceCount = (item.source_memory_ids || []).length;
   return `<div class="compress-item">
-    <div>${escHtml(item.content || "")}</div>
     <div class="compress-item-meta">
       <span>${escHtml(kindLabel)}</span>
+      <span>stage ${Number(item.compression_stage || 0)}</span>
       <span>${escHtml(fmtDraftTime(item.memory_time || item.source_start_ts))}</span>
       <span>来源 ${sourceCount} 条日常</span>
       <span>重要度 ${Number(item.importance || 0).toFixed(2)}</span>
       ${kws.length ? `<span>${kws.map(k => escHtml(k)).join(" · ")}</span>` : ""}
     </div>
-    ${item.reason ? `<div class="compress-item-reason">${escHtml(item.reason)}</div>` : ""}
+    <div class="compress-edit">
+      <textarea oninput="setDraftItemValue('${area}',${batchIndex},'${field}',${itemIndex},'content',this.value)">${escHtml(item.content || "")}</textarea>
+      <div class="compress-edit-row">
+        <input value="${escHtml(kws.join(", "))}" placeholder="关键词" oninput="setDraftItemValue('${area}',${batchIndex},'${field}',${itemIndex},'keywords',this.value)">
+        <input type="number" min="0" max="1" step="0.05" value="${Number(item.importance || 0).toFixed(2)}" oninput="setDraftItemValue('${area}',${batchIndex},'${field}',${itemIndex},'importance',this.value)">
+        <input type="number" min="0" max="4" step="1" value="${Number(item.compression_stage || 0)}" oninput="setDraftItemValue('${area}',${batchIndex},'${field}',${itemIndex},'compression_stage',this.value)">
+      </div>
+      <input value="${escHtml(item.reason || "")}" placeholder="理由/证据摘要" oninput="setDraftItemValue('${area}',${batchIndex},'${field}',${itemIndex},'reason',this.value);setDraftItemValue('${area}',${batchIndex},'${field}',${itemIndex},'evidence_summary',this.value)">
+      <div class="compress-mini-actions"><button onclick="removeDraftItem('${area}',${batchIndex},'${field}',${itemIndex})">删除这条</button></div>
+    </div>
   </div>`;
 }
 
-function renderOldCompressItem(item) {
+function renderOldCompressItem(item, area, batchIndex, covered) {
   return `<div class="compress-item">
-    <div>${escHtml(item.content || "")}</div>
-    <div class="compress-item-meta">
-      <span>${escHtml(fmtDraftTime(item.source_start_ts || item.created_at))}</span>
-      <span>重要度 ${Number(item.importance || 0).toFixed(2)}</span>
-    </div>
+    <label class="compress-old-toggle">
+      <input type="checkbox" ${covered ? "checked" : ""} onchange="setOldRowCovered('${area}',${batchIndex},'${escHtml(item.id)}',this.checked)">
+      <div>
+        <div>${escHtml(item.content || "")}</div>
+        <div class="compress-item-meta">
+          <span>${escHtml(fmtDraftTime(item.source_start_ts || item.created_at))}</span>
+          <span>stage ${Number(item.compression_stage || 0)}</span>
+          <span>重要度 ${Number(item.importance || 0).toFixed(2)}</span>
+          <span>${covered ? "确认后压缩/移除旧条目" : "保留这条旧记忆"}</span>
+        </div>
+      </div>
+    </label>
   </div>`;
+}
+
+function renderDraftItems(area, field, label) {
+  return draftBatches(area).map((batch, batchIndex) => {
+    const items = batch[field] || [];
+    return items.map((item, itemIndex) => renderCompressItem(
+      item,
+      `${label} · ${batch.tier_label || batch.compression_tier || "stage"}`,
+      area,
+      batchIndex,
+      field,
+      itemIndex
+    )).join("");
+  }).join("");
+}
+
+function renderOldRowsForArea(area) {
+  return draftBatches(area).map((batch, batchIndex) => {
+    const covered = draftCoveredSet(batch);
+    return (batch.old_rows || []).map(row => renderOldCompressItem(row, area, batchIndex, covered.has(row.id))).join("");
+  }).join("");
+}
+
+function countDraftItems(area, field) {
+  return draftBatches(area).reduce((sum, batch) => sum + ((batch[field] || []).length), 0);
+}
+
+function countOldRows(area) {
+  return draftBatches(area).reduce((sum, batch) => sum + ((batch.old_rows || []).length), 0);
+}
+
+function draftCompressionWarnings() {
+  const warnings = [];
+  ["main", "chatroom"].forEach(area => {
+    draftBatches(area).forEach(batch => {
+      const input = Number(batch.input_count || 0);
+      if (!input) return;
+      const processed = draftCoveredSet(batch).size;
+      const created = (batch.compressed_daily || []).length + (batch.important_memories || []).length;
+      const ratio = processed / input;
+      const label = batch.tier_label || batch.compression_tier || "未命名档位";
+      if (batch.compression_tier === "recent" && ratio > 0.4) {
+        warnings.push(`${label} 拟移除 ${processed}/${input} 条，近期记忆可能压得过狠。`);
+      }
+      if (batch.compression_tier === "recent" && input >= 5 && created === 0) {
+        warnings.push(`${label} 没有生成新记忆，请确认不是误删近期内容。`);
+      }
+      if (batch.compression_tier === "archive" && (batch.compressed_daily || []).length > 1) {
+        warnings.push(`${label} 生成了较多普通日常，事实档案层建议只保留重大事实。`);
+      }
+    });
+  });
+  return warnings;
+}
+
+function draftHasArea(area) {
+  return draftBatches(area).length > 0;
+}
+
+function renderDraftAddButtons(area) {
+  if (!draftHasArea(area)) return "";
+  return `<div class="compress-mini-actions">
+    <button onclick="addDraftItem('${area}','compressed_daily')">新增日常</button>
+    <button onclick="addDraftItem('${area}','important_memories')">新增长期重要</button>
+    </div>
+  `;
 }
 
 function parseKeywordText(value) {
@@ -509,16 +753,13 @@ function renderDailyCompressionReview() {
   }
   const counts = _dailyCompressReview.counts || {};
   const total = counts.total || {};
-  const mainDaily = flattenDraftBatches("main", "compressed_daily");
-  const mainImportant = flattenDraftBatches("main", "important_memories");
-  const chatDaily = flattenDraftBatches("chatroom", "compressed_daily");
-  const chatImportant = flattenDraftBatches("chatroom", "important_memories");
-  const dailyItems = [...mainDaily.map(item => ({...item, area:"主记忆"})), ...chatDaily.map(item => ({...item, area:"聊天室"}))];
-  const importantItems = [...mainImportant.map(item => ({...item, area:"主记忆"})), ...chatImportant.map(item => ({...item, area:"聊天室"}))];
-  const oldRows = [...oldRowsForDraft("main"), ...oldRowsForDraft("chatroom")];
+  const dailyCount = countDraftItems("main", "compressed_daily") + countDraftItems("chatroom", "compressed_daily");
+  const importantCount = countDraftItems("main", "important_memories") + countDraftItems("chatroom", "important_memories");
+  const oldRowCount = countOldRows("main") + countOldRows("chatroom");
   const messages = [...(counts.main?.messages || []), ...(counts.chatroom?.messages || [])].filter(Boolean);
   const errors = total.errors || [];
-  const canApply = _dailyCompressReview.status === 'draft' && (dailyItems.length || importantItems.length || Number(total.processed || 0));
+  const warnings = draftCompressionWarnings();
+  const canApply = _dailyCompressReview.status === 'draft' && (dailyCount || importantCount || Number(total.processed || 0));
   el.style.display = "block";
   el.innerHTML = `
     <div class="compress-review-head">
@@ -532,20 +773,23 @@ function renderDailyCompressionReview() {
       <span>新长期重要 ${Number(total.created_important || 0)}</span>
     </div>
     ${messages.length ? `<div class="compress-review-msg">${escHtml(messages.join("\n"))}</div>` : ""}
+    ${warnings.length ? `<div class="compress-review-msg" style="color:#ad6800">${escHtml(warnings.join("\n"))}</div>` : ""}
     ${errors.length ? `<div class="compress-review-msg" style="color:#c62828">${escHtml(errors.join("\n"))}</div>` : ""}
+    ${renderDraftAddButtons("main")}
     <details open>
-      <summary>新日常 ${dailyItems.length}</summary>
-      ${dailyItems.length ? dailyItems.map(item => renderCompressItem(item, `${item.area} · 日常`)).join("") : '<div class="mem-empty">没有新日常</div>'}
+      <summary>新日常 ${dailyCount}</summary>
+      ${dailyCount ? `${renderDraftItems("main", "compressed_daily", "主记忆 · 日常")}${renderDraftItems("chatroom", "compressed_daily", "聊天室 · 日常")}` : '<div class="mem-empty">没有新日常</div>'}
     </details>
-    <details ${importantItems.length ? "open" : ""}>
-      <summary>新长期重要 ${importantItems.length}</summary>
-      ${importantItems.length ? importantItems.map(item => renderCompressItem(item, `${item.area} · 长期重要`)).join("") : '<div class="mem-empty">没有新长期重要</div>'}
+    <details ${importantCount ? "open" : ""}>
+      <summary>新长期重要 ${importantCount}</summary>
+      ${importantCount ? `${renderDraftItems("main", "important_memories", "主记忆 · 长期重要")}${renderDraftItems("chatroom", "important_memories", "聊天室 · 长期重要")}` : '<div class="mem-empty">没有新长期重要</div>'}
     </details>
     <details>
-      <summary>将移除的旧日常 ${oldRows.length}</summary>
-      ${oldRows.length ? oldRows.slice(0, 120).map(renderOldCompressItem).join("") : '<div class="mem-empty">没有旧日常会被移除</div>'}
+      <summary>旧日常处理 ${oldRowCount}</summary>
+      ${oldRowCount ? `${renderOldRowsForArea("main")}${renderOldRowsForArea("chatroom")}` : '<div class="mem-empty">没有旧日常会被处理</div>'}
     </details>
     <div class="compress-review-actions">
+      <button class="compress-discard-btn" onclick="saveDailyCompressionDraft(false)">保存草稿</button>
       <button class="compress-discard-btn" onclick="discardDailyCompressionDraft('${escHtml(_dailyCompressReview.id)}')">废弃草稿</button>
       <button class="compress-apply-btn" onclick="applyDailyCompressionDraft('${escHtml(_dailyCompressReview.id)}')" ${canApply ? "" : "disabled"}>确认应用</button>
     </div>`;
@@ -563,8 +807,9 @@ async function applyDailyCompressionDraft(reviewId) {
   setCompressionReviewBusy(true);
   statusEl.style.display = "block";
   statusEl.className = "digest-status info";
-  statusEl.textContent = "正在应用压缩草稿并重算向量...";
+  statusEl.textContent = "正在保存并应用压缩草稿...";
   try {
+    await saveDailyCompressionDraft(true);
     const result = await api("POST", `/api/memories/compress-daily/${reviewId}/apply`);
     if (!result.ok) throw new Error(result.message || "应用失败");
     _dailyCompressReview = null;
@@ -668,7 +913,7 @@ function renderSourceSelection() {
 function updateSourceSummary() {
   const total = _sourceMessages.length;
   const kept = _sourceMessages.filter(m => m.selected).length;
-  $("sourceSummary").textContent = `将保留 ${kept}/${total} 条原文作为这条记忆的证据；点击保存前不会写入数据库。`;
+  $("sourceSummary").textContent = `将保留 ${kept}/${total} 条原文挂载到这条记忆；点击保存前不会写入数据库。`;
 }
 
 function toggleSourceMsg(index, checked) {
@@ -693,12 +938,16 @@ async function saveSourceSelection() {
   btn.textContent = "保存中...";
   try {
     const result = await api("POST", `/api/memories/${_sourceMemId}/source-selection`, { source_message_ids: selectedIds });
+    if (!result.ok) throw new Error(result.message || "保存失败");
     const mem = _allMemories.find(m => m.id === _sourceMemId);
     if (mem) {
       mem.source_msg_id = result.source_msg_id;
       mem.source_start_ts = result.source_start_ts;
       mem.source_end_ts = result.source_end_ts;
       mem.source_count = result.selected_count || 0;
+      mem.memory_time = result.memory_time;
+      mem.memory_time_end = result.memory_time_end;
+      mem.memory_time_label = result.memory_time_label || fmtMemoryOccurrence(mem);
     }
     renderMemories();
     closeSource();

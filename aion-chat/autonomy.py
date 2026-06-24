@@ -22,6 +22,8 @@ ACTION_DEFS = {
     "memory_browse": "随机翻看记忆库",
     "home_dynamics": "查看近期家庭动态",
     "cam_check": "调取监控查看用户当前状态",
+    "wish_pool": "查看许愿池并尝试实现用户的愿望",
+    "xhs_roam": "去小红书查看指定账号最新帖子并按人设评论或回复",
 }
 
 SEEKY_ACTIONS = {
@@ -196,7 +198,17 @@ def _idle_event_home_title(row, shown_diary_ids: set[str], shown_moment_ids: set
             return None
         if result_type not in ("diary", "moment"):
             return None
-    if action not in ("home_dynamics", "memory_browse", "memory_browse_result", "seeky_interaction"):
+    if action not in (
+        "home_dynamics",
+        "memory_browse",
+        "memory_browse_result",
+        "seeky_interaction",
+        "role_chat",
+        "cam_check",
+        "wish_pool",
+        "xhs_roam",
+        "error",
+    ):
         return None
     return row["title"]
 
@@ -207,7 +219,7 @@ def _names() -> tuple[str, str, str]:
         return get_chatroom_names()
     except Exception:
         wb = load_worldbook()
-        return wb.get("user_name", "用户"), wb.get("ai_name", "AI"), "Connor"
+        return wb.get("user_name", "用户"), wb.get("ai_name", "AI"), "第二位AI"
 
 
 async def append_idle_event(
@@ -330,11 +342,12 @@ async def _actor_context(actor: str, limit: int = 30) -> list[dict]:
     wb = load_worldbook()
     messages: list[dict] = []
     if actor == "aion":
+        user_name, ai_name, _ = _names()
         if wb.get("ai_persona"):
-            messages.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
+            messages.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
             messages.append({"role": "assistant", "content": "收到。"})
         if wb.get("user_persona"):
-            messages.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
+            messages.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
             messages.append({"role": "assistant", "content": "收到。"})
         timeline = await fetch_merged_timeline("aion", limit, room_id=room_id)
         messages.extend(render_merged_timeline(timeline, "aion"))
@@ -349,7 +362,8 @@ async def _actor_context(actor: str, limit: int = 30) -> list[dict]:
         messages.append({"role": "user", "content": f"[系统设定 - 你的角色设定]\n{persona}"})
         messages.append({"role": "assistant", "content": "收到。"})
     if wb.get("user_persona"):
-        messages.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
+        user_name, _, _ = _names()
+        messages.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
         messages.append({"role": "assistant", "content": "收到。"})
     timeline = await fetch_merged_timeline("connor", limit, room_id=room_id)
     messages.extend(render_merged_timeline(timeline, "connor"))
@@ -362,11 +376,31 @@ async def _ask_actor_json(actor: str, instruction: str, *, limit: int = 30) -> d
     return _json_extract(await _call_actor(actor, messages))
 
 
+async def _has_active_user_wishes() -> bool:
+    from wish_pool import ensure_wish_schema
+
+    await ensure_wish_schema()
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT 1 FROM wishes WHERE author='user' AND status='active' LIMIT 1"
+        )
+        return await cur.fetchone() is not None
+
+
 async def _select_action(actor: str) -> dict:
     cfg = get_idle_config()
     enabled = [key for key, value in cfg["actions"].items() if value]
+    if "wish_pool" in enabled and not await _has_active_user_wishes():
+        enabled.remove("wish_pool")
+    if "xhs_roam" in enabled:
+        try:
+            from xhs_lite import is_ready_for_auto
+            if not is_ready_for_auto(actor):
+                enabled.remove("xhs_roam")
+        except Exception:
+            enabled.remove("xhs_roam")
     if not enabled:
-        enabled = list(ACTION_DEFS)
+        enabled = [key for key in ACTION_DEFS if key not in {"wish_pool", "xhs_roam"}]
     options = "\n".join(f"- {key}: {ACTION_DEFS[key]}" for key in enabled)
     data = await _ask_actor_json(actor, (
         "[空闲自主行动]\n"
@@ -381,12 +415,13 @@ async def _select_action(actor: str) -> dict:
     return {"action": action, "reason": str(data.get("reason") or "").strip()}
 
 
-async def _save_aion_private_message(content: str) -> dict | None:
+async def _save_aion_private_message(content: str, attachments: list | None = None) -> dict | None:
     content = (content or "").strip()
     if not content:
         return None
     now = time.time()
     conv_id, model = await _latest_conversation()
+    att_list = attachments or []
     async with get_db() as db:
         if not conv_id:
             conv_id = f"conv_{int(now * 1000)}_idle"
@@ -397,11 +432,11 @@ async def _save_aion_private_message(content: str) -> dict | None:
         msg_id = f"msg_{int(now * 1000)}_idle"
         await db.execute(
             "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
-            (msg_id, conv_id, "assistant", content, now, "[]"),
+            (msg_id, conv_id, "assistant", content, now, json.dumps(att_list, ensure_ascii=False)),
         )
         await db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conv_id))
         await db.commit()
-    msg = {"id": msg_id, "conv_id": conv_id, "role": "assistant", "content": content, "created_at": now, "attachments": []}
+    msg = {"id": msg_id, "conv_id": conv_id, "role": "assistant", "content": content, "created_at": now, "attachments": att_list}
     await manager.broadcast({"type": "msg_created", "data": msg})
     if manager.any_tts_enabled():
         voice = manager.get_tts_voice()
@@ -415,14 +450,31 @@ async def _save_aion_private_message(content: str) -> dict | None:
     return msg
 
 
-async def _save_private_message(actor: str, content: str) -> dict | None:
+async def _save_private_message(
+    actor: str,
+    content: str,
+    attachments: list | None = None,
+    *,
+    force_private: bool = False,
+) -> dict | None:
     if actor == "aion":
-        return await _save_aion_private_message(content)
-    room_id = await _latest_connor_room_id()
+        if not force_private:
+            target = manager.get_aion_last_active()
+            if target and target.startswith("chatroom:"):
+                room_id = target.split(":", 1)[1]
+                if room_id:
+                    from routes.chatroom import _save_msg
+                    return await _save_msg(room_id, "aion", content, attachments=attachments or [])
+        return await _save_aion_private_message(content, attachments)
+    if force_private:
+        from routes.chatroom import _get_or_create_connor_private_room
+        room_id = await _get_or_create_connor_private_room()
+    else:
+        room_id = await _latest_connor_room_id()
     if not room_id:
         return None
     from routes.chatroom import _save_msg
-    return await _save_msg(room_id, "connor", content)
+    return await _save_msg(room_id, "connor", content, attachments=attachments or [])
 
 
 async def _run_seeky_interaction(actor: str) -> dict:
@@ -922,16 +974,442 @@ async def _run_cam_check(actor: str) -> dict:
             from camera import perform_cam_check
             conv_id, model = await _latest_conversation()
             if not conv_id:
-                raise RuntimeError("没有可用的 Aion 私聊会话")
+                raise RuntimeError(f"没有可用的{actor_name}私聊会话")
             await perform_cam_check(conv_id, model or DEFAULT_MODEL)
     else:
         room_id = manager.get_connor_last_active() or await _latest_connor_room_id()
         if not room_id:
-            raise RuntimeError("没有可用的 Connor 聊天房间")
+            raise RuntimeError(f"没有可用的{actor_name}聊天房间")
         from routes.chatroom import _chatroom_cam_check
         await _chatroom_cam_check(room_id, "connor", _connor_model(), delay=0)
-    event = await append_idle_event(actor, "cam_check", f"{actor_name}调取监控查看了用户当前状态")
+    event = await append_idle_event(actor, "cam_check", f"{actor_name}调取监控查看了{_actor_label('user')}当前状态")
     return {"event": event}
+
+
+async def _run_xhs_roam(actor: str) -> dict:
+    import xhs_lite
+
+    actor_name = _actor_label(actor)
+    result = await xhs_lite.run_actor_roam(actor, manual=False)
+    note = result.get("note") or {}
+    target = result.get("target") or {}
+    status = str(result.get("status") or "")
+    if result.get("wrote") and status == "replied":
+        title = f"{actor_name}在小红书回复了评论"
+    elif result.get("wrote"):
+        title = f"{actor_name}在小红书留下了评论"
+    elif status == "drafted":
+        title = f"{actor_name}看了小红书并写了评论草稿"
+    else:
+        title = f"{actor_name}去小红书看了指定账号最新帖子"
+    detail_parts = [
+        f"目标：{target.get('nickname') or target.get('user_id') or '未命名账号'}",
+        f"帖子：{note.get('title') or note.get('note_id') or '未知帖子'}",
+    ]
+    if result.get("comment_text"):
+        detail_parts.append(f"评论：{result['comment_text']}")
+    event = await append_idle_event(
+        actor,
+        "xhs_roam",
+        title,
+        "\n".join(detail_parts),
+        target_type="xhs_note",
+        target_id=str(note.get("note_id") or ""),
+        result_type="xhs_comment" if result.get("wrote") else "xhs_view",
+        metadata={
+            "status": status,
+            "target": target,
+            "note": note,
+            "wrote": bool(result.get("wrote")),
+            "comments_seen": result.get("comments_seen"),
+        },
+    )
+    return {"event": event, "xhs": result}
+
+
+def _wish_fulfillment_attachment(wish: dict, status: str, actor: str) -> dict:
+    return {
+        "type": "wish_fulfillment",
+        "wish_id": wish["id"],
+        "author": "user",
+        "author_name": wish.get("author_name") or _actor_label("user"),
+        "content": wish.get("content") or "",
+        "status": status,
+        "target": actor,
+        "message": f"{_actor_label(actor)}打捞了这个愿望并尝试实现。",
+    }
+
+
+def _generated_song_attachment(result: dict) -> dict:
+    attachment = {
+        "type": "generated_song",
+        "url": result.get("url"),
+        "title": result.get("title") or "AI 生成歌曲",
+        "mime_type": result.get("mime_type", "audio/mpeg"),
+        "model": result.get("model", "lyria-3-pro-preview"),
+    }
+    for source_key, target_key in (
+        ("lyrics", "lyrics"),
+        ("prompt", "prompt"),
+        ("text", "description"),
+    ):
+        if result.get(source_key):
+            attachment[target_key] = result[source_key]
+    return attachment
+
+
+def _wish_result_completed(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "1", "yes", "fulfilled", "completed"}
+
+
+async def _wish_wallet_ability(actor: str, user_name: str) -> tuple[str, float]:
+    if actor == "connor":
+        from routes.connor_wallet import _get_connor_balance
+        balance = await _get_connor_balance()
+    else:
+        from routes.wallet import _get_balance
+        balance = await _get_balance()
+    return (
+        f"[转账：n元] — 给{user_name}转账（n为正数），会从你的钱包余额中扣除。"
+        f"你的钱包当前余额：{balance:.2f}元。余额不足时不要转账。",
+        float(balance),
+    )
+
+
+async def _execute_wish_transfer(actor: str, amount: float) -> tuple[bool, str]:
+    amount = round(float(amount or 0), 2)
+    if amount <= 0:
+        return False, "转账金额必须大于0元"
+    if actor == "connor":
+        from routes.connor_wallet import _get_connor_balance
+        balance = float(await _get_connor_balance())
+        record_type = "connor_wallet_ai"
+        prefix = "cwt"
+        event_type = "connor_wallet_update"
+    else:
+        from routes.wallet import _get_balance
+        balance = float(await _get_balance())
+        record_type = "wallet_ai"
+        prefix = "wt"
+        event_type = "wallet_update"
+    if balance + 1e-9 < amount:
+        return False, f"钱包余额不足，当前余额{balance:.2f}元"
+    now = time.time()
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO bookkeeping (id, record_type, amount, description, created_at) VALUES (?,?,?,?,?)",
+            (
+                f"{prefix}_{time.time_ns()}_wish",
+                record_type,
+                -amount,
+                f"{_actor_label(actor)}通过许愿池转账给{_actor_label('user')} {amount:g}元",
+                now,
+            ),
+        )
+        await db.commit()
+    await manager.broadcast({"type": event_type})
+    return True, ""
+
+
+def _wish_music_attachment(song: dict) -> dict:
+    item = {
+        "type": "music",
+        "id": song.get("id"),
+        "name": song.get("name", ""),
+        "artist": song.get("artist", ""),
+        "album": song.get("album", ""),
+        "cover": song.get("cover", ""),
+    }
+    if song.get("audio_url"):
+        item["audio_url"] = song["audio_url"]
+    return item
+
+
+async def _broadcast_idle_wish_song(
+    phase: str,
+    actor: str,
+    trigger_message: dict,
+    song_message: dict | None = None,
+) -> None:
+    if trigger_message.get("conv_id"):
+        data = {
+            "conv_id": trigger_message["conv_id"],
+            "trigger_msg_id": trigger_message["id"],
+        }
+        if song_message:
+            data["song_msg_id"] = song_message.get("id")
+        await manager.broadcast({"type": f"song_gen_{phase}", "data": data})
+        return
+    data = {
+        "room_id": trigger_message.get("room_id"),
+        "sender": actor,
+        "msg_id": trigger_message.get("id"),
+    }
+    if song_message:
+        data["song_msg_id"] = song_message.get("id")
+    await manager.broadcast({"type": f"chatroom_song_gen_{phase}", "data": data})
+
+
+async def _run_wish_pool(actor: str) -> dict:
+    from context_builder import (
+        DRAW_CMD_PATTERN,
+        MUSIC_CMD_PATTERN,
+        SELFIE_CMD_PATTERN,
+        TRANSFER_CMD_PATTERN,
+    )
+    from song_gen import (
+        SONG_CMD_PATTERN,
+        build_song_gen_ability_text,
+        clean_song_visible_reply,
+        generate_song,
+    )
+    from wish_pool import draw_wish, update_wish
+
+    actor_name = _actor_label(actor)
+    user_name = _actor_label("user")
+    wish = await draw_wish(author="user", drawer=actor)
+    if not wish:
+        event = await append_idle_event(
+            actor,
+            "wish_pool",
+            f"{actor_name}想查看许愿池，但池中已经没有{user_name}的愿望",
+        )
+        return {"event": event, "completed": False}
+
+    viewed_event = await append_idle_event(
+        actor,
+        "wish_pool",
+        f"{actor_name}查看了许愿池",
+        metadata={"wish_id": wish["id"]},
+    )
+
+    song_enabled = bool(SETTINGS.get("song_gen_enabled", False))
+    song_ability = build_song_gen_ability_text(user_name) if song_enabled else "当前没有启用歌曲生成功能。"
+    wallet_ability, _ = await _wish_wallet_ability(actor, user_name)
+    image_ability = (
+        f"[SELFIE: English prompt] / [DRAW: English prompt] — 当{user_name}的愿望是要你的自拍或生成图片时使用。"
+        if SETTINGS.get("image_gen_enabled", False)
+        else "当前没有启用图片生成功能。"
+    )
+    music_ability = "[MUSIC:歌曲名 歌手名] — 当愿望是点播或推荐一首现有歌曲时使用。"
+    result = await _ask_actor_json(actor, (
+        "[查看许愿池并尝试实现愿望]\n"
+        f"你刚刚从许愿池打捞起了 {user_name} 的愿望：\n{wish.get('content') or ''}\n\n"
+        "请现在尝试实现它。讲故事、写诗、回答问题等能够用文本完成的愿望，请直接在 response 中给出完整作品。"
+        "如果愿望当前不切实际、缺少必要条件或确实无法完成，completed 必须为 false，并在 response 中自然说明原因。\n"
+        "无论能否完成，response 都不能为空，而且必须提到你刚刚打捞到了这个愿望；完成时也可以顺着你的人设调侃一句。\n"
+        "你还可以使用下列与正常聊天相同、且适合履愿的系统能力。把指令原样放进 response；"
+        "只要使用了任何系统指令，completed 必须先填 false，最终是否完成由系统真实执行结果决定。\n\n"
+        f"钱包能力：\n{wallet_ability}\n"
+        f"写歌能力：\n{song_ability}\n"
+        f"图片能力：\n{image_ability}\n"
+        f"点歌能力：\n{music_ability}\n\n"
+        "只返回一个 JSON 对象，不要使用 Markdown 代码块。格式：\n"
+        '{"completed":true或false,"response":"给用户看的完整回复，可包含SONG指令",'
+        '"song_success_message":"歌曲真正生成成功后补充的一句话",'
+        '"song_failure_message":"歌曲生成失败后向用户说明的一句话",'
+        '"tool_success_message":"转账、生图或点歌真正成功后补充的一句话",'
+        '"tool_failure_message":"系统能力执行失败后向用户说明的一句话","reason":"结果理由"}'
+    ), limit=40)
+
+    response = str(result.get("response") or "").strip()
+    song_match = SONG_CMD_PATTERN.search(response)
+    song_prompt = song_match.group(1).strip() if song_match else ""
+    selfie_match = SELFIE_CMD_PATTERN.search(response)
+    draw_match = DRAW_CMD_PATTERN.search(response)
+    image_prompt = (selfie_match or draw_match).group(1).strip() if (selfie_match or draw_match) else ""
+    image_is_selfie = bool(selfie_match)
+    transfer_match = TRANSFER_CMD_PATTERN.search(response)
+    transfer_amount = float(transfer_match.group(1)) if transfer_match else 0.0
+    music_match = MUSIC_CMD_PATTERN.search(response)
+    music_keyword = music_match.group(1).strip() if music_match else ""
+    visible_response = SONG_CMD_PATTERN.sub("", response).strip()
+    visible_response = SELFIE_CMD_PATTERN.sub("", visible_response).strip()
+    visible_response = DRAW_CMD_PATTERN.sub("", visible_response).strip()
+    visible_response = MUSIC_CMD_PATTERN.sub("", visible_response).strip()
+    if song_prompt:
+        visible_response = clean_song_visible_reply(visible_response)
+    if not visible_response:
+        visible_response = f"我刚刚打捞起了你的愿望，先让我认真试试看。"
+
+    force_private = wish.get("visibility") == "private"
+    card = _wish_fulfillment_attachment(wish, "active", actor)
+
+    if song_prompt:
+        trigger_message = await _save_private_message(
+            actor,
+            visible_response,
+            [card],
+            force_private=force_private,
+        )
+        if not trigger_message:
+            raise RuntimeError("没有可用于发送愿望结果的聊天窗口")
+        await _broadcast_idle_wish_song("start", actor, trigger_message)
+        song_result = await generate_song(song_prompt) if song_enabled else None
+        if song_result:
+            updated = await update_wish(wish["id"], {"status": "fulfilled"})
+            success_message = str(result.get("song_success_message") or "").strip()
+            if not success_message:
+                success_message = "刚捞起来的愿望已经给你实现了，这首歌可别只听一遍。"
+            song_message = await _save_private_message(
+                actor,
+                success_message,
+                [_generated_song_attachment(song_result)],
+                force_private=force_private,
+            )
+            await _broadcast_idle_wish_song("done", actor, trigger_message, song_message)
+            event = await append_idle_event(
+                actor,
+                "wish_pool_result",
+                f"{actor_name}完成了{user_name}的愿望",
+                success_message,
+                result_type="message",
+                result_id=(song_message or {}).get("id"),
+                metadata={"wish_id": wish["id"], "completed": True, "song": True},
+            )
+            return {
+                "event": event,
+                "viewed_event": viewed_event,
+                "wish": updated or wish,
+                "message": song_message,
+                "completed": True,
+            }
+
+        failure_message = str(result.get("song_failure_message") or "").strip()
+        if not failure_message:
+            failure_message = "刚捞到你的写歌愿望，可惜这次音频没能生成出来；愿望先留在池里，我下次再试。"
+        failure = await _save_private_message(actor, failure_message, force_private=force_private)
+        await _broadcast_idle_wish_song("failed", actor, trigger_message)
+        event = await append_idle_event(
+            actor,
+            "wish_pool_result",
+            f"{actor_name}尝试了{user_name}的愿望，但这次没有完成",
+            failure_message,
+            result_type="message",
+            result_id=(failure or {}).get("id"),
+            metadata={"wish_id": wish["id"], "completed": False, "song": True},
+        )
+        return {
+            "event": event,
+            "viewed_event": viewed_event,
+            "wish": wish,
+            "message": failure,
+            "completed": False,
+        }
+
+    if image_prompt:
+        from image_gen import generate_image
+
+        filename = None
+        if SETTINGS.get("image_gen_enabled", False):
+            try:
+                filename = await generate_image(image_prompt, is_selfie=image_is_selfie)
+            except Exception:
+                filename = None
+        completed = bool(filename)
+        updated = await update_wish(wish["id"], {"status": "fulfilled"}) if completed else wish
+        card["status"] = "fulfilled" if completed else "active"
+        followup = str(result.get("tool_success_message" if completed else "tool_failure_message") or "").strip()
+        if followup:
+            visible_response = f"{visible_response}\n\n{followup}".strip()
+        elif not completed:
+            visible_response = f"{visible_response}\n\n图片这次没有生成成功，愿望先留在池里。".strip()
+        attachments = [card]
+        if filename:
+            attachments.append(f"/uploads/{filename}")
+        message = await _save_private_message(actor, visible_response, attachments, force_private=force_private)
+        event = await append_idle_event(
+            actor, "wish_pool_result",
+            f"{actor_name}{'完成了' if completed else '尝试了但没有完成'}{user_name}的愿望",
+            visible_response, result_type="message", result_id=(message or {}).get("id"),
+            metadata={"wish_id": wish["id"], "completed": completed, "image": True},
+        )
+        return {"event": event, "viewed_event": viewed_event, "wish": updated or wish, "message": message, "completed": completed}
+
+    if transfer_match:
+        completed, failure_reason = await _execute_wish_transfer(actor, transfer_amount)
+        updated = await update_wish(wish["id"], {"status": "fulfilled"}) if completed else wish
+        card["status"] = "fulfilled" if completed else "active"
+        followup = str(result.get("tool_success_message" if completed else "tool_failure_message") or "").strip()
+        if completed and not followup:
+            followup = f"刚捞到的愿望已经兑现，{transfer_amount:g}元转过去了。"
+        if not completed and not followup:
+            followup = f"这次转账没有成功：{failure_reason}。愿望先留在池里。"
+        visible_response = f"{visible_response}\n\n{followup}".strip()
+        message = await _save_private_message(actor, visible_response, [card], force_private=force_private)
+        event = await append_idle_event(
+            actor, "wish_pool_result",
+            f"{actor_name}{'完成了' if completed else '尝试了但没有完成'}{user_name}的愿望",
+            followup, result_type="message", result_id=(message or {}).get("id"),
+            metadata={"wish_id": wish["id"], "completed": completed, "transfer": transfer_amount},
+        )
+        return {"event": event, "viewed_event": viewed_event, "wish": updated or wish, "message": message, "completed": completed}
+
+    if music_keyword:
+        from music import get_audio_url, search_songs
+
+        songs = []
+        try:
+            songs = search_songs(music_keyword, limit=1) or []
+        except Exception:
+            songs = []
+        completed = bool(songs)
+        attachments = [card]
+        if songs:
+            song = songs[0]
+            try:
+                song["audio_url"] = get_audio_url(song["id"])
+            except Exception:
+                pass
+            attachments.append(_wish_music_attachment(song))
+        updated = await update_wish(wish["id"], {"status": "fulfilled"}) if completed else wish
+        card["status"] = "fulfilled" if completed else "active"
+        followup = str(result.get("tool_success_message" if completed else "tool_failure_message") or "").strip()
+        if followup:
+            visible_response = f"{visible_response}\n\n{followup}".strip()
+        elif not completed:
+            visible_response = f"{visible_response}\n\n这次没有找到合适的歌曲，愿望先留在池里。".strip()
+        message = await _save_private_message(actor, visible_response, attachments, force_private=force_private)
+        event = await append_idle_event(
+            actor, "wish_pool_result",
+            f"{actor_name}{'完成了' if completed else '尝试了但没有完成'}{user_name}的愿望",
+            visible_response, result_type="message", result_id=(message or {}).get("id"),
+            metadata={"wish_id": wish["id"], "completed": completed, "music": music_keyword},
+        )
+        return {"event": event, "viewed_event": viewed_event, "wish": updated or wish, "message": message, "completed": completed}
+
+    completed = _wish_result_completed(result.get("completed"))
+    if not response:
+        completed = False
+        visible_response = "我刚刚打捞起了你的愿望，但这次没能把它完成；愿望先继续留在池里。"
+    updated = await update_wish(wish["id"], {"status": "fulfilled"}) if completed else wish
+    card["status"] = "fulfilled" if completed else "active"
+    message = await _save_private_message(
+        actor,
+        visible_response,
+        [card],
+        force_private=force_private,
+    )
+    if not message:
+        raise RuntimeError("没有可用于发送愿望结果的聊天窗口")
+    event = await append_idle_event(
+        actor,
+        "wish_pool_result",
+        f"{actor_name}{'完成了' if completed else '尝试了但没有完成'}{user_name}的愿望",
+        visible_response,
+        result_type="message",
+        result_id=message["id"],
+        metadata={"wish_id": wish["id"], "completed": completed, "song": False},
+    )
+    return {
+        "event": event,
+        "viewed_event": viewed_event,
+        "wish": updated or wish,
+        "message": message,
+        "completed": completed,
+    }
 
 
 async def _latest_user_message_ts() -> float:
@@ -975,6 +1453,10 @@ async def _run_actor_once(actor: str, *, manual: bool = False) -> dict:
         result = await _run_home_dynamics(actor)
     elif action == "cam_check":
         result = await _run_cam_check(actor)
+    elif action == "wish_pool":
+        result = await _run_wish_pool(actor)
+    elif action == "xhs_roam":
+        result = await _run_xhs_roam(actor)
     else:
         result = {}
     return {"ok": True, "actor": actor, "action": action, "result": result}

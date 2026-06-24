@@ -18,6 +18,7 @@ import android.content.ContentValues;
 import android.provider.MediaStore;
 import android.util.Base64;
 import android.webkit.ConsoleMessage;
+import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
@@ -53,7 +54,12 @@ public class WebViewActivity extends AppCompatActivity {
     private static final int REQ_AUDIO = 1001;
     private static final int REQ_CAMERA = 1002;
     private WebView webView;
+    private SharedAssetCache sharedAssetCache;
+    private MediaCacheStore mediaCacheStore;
+    private SharedJsonStore sharedJsonStore;
+    private AionRingBleBridge ringBleBridge;
     private String targetUrl;
+    private boolean initialPageLoadStarted = false;
     private boolean pageLoaded = false;
     private boolean permissionsRequested = false;
     private int retryCount = 0;
@@ -61,6 +67,8 @@ public class WebViewActivity extends AppCompatActivity {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private ValueCallback<Uri[]> fileCallback;
     private PermissionRequest pendingPermRequest;
+    private static final String CLOUDFLARE_HOST = ConnectionEndpoint.CLOUDFLARE_HOST;
+    private static final String CLOUDFLARE_ACCESS_HOST = "cloudflareaccess.com";
 
     private final ActivityResultLauncher<Intent> fileChooserLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -115,6 +123,9 @@ public class WebViewActivity extends AppCompatActivity {
         WebView.setWebContentsDebuggingEnabled(true);
 
         webView = new WebView(this);
+        sharedAssetCache = new SharedAssetCache(this);
+        mediaCacheStore = new MediaCacheStore(this);
+        sharedJsonStore = new SharedJsonStore(this);
         webView.setBackgroundColor(android.graphics.Color.TRANSPARENT);
         setContentView(webView);
 
@@ -178,7 +189,9 @@ public class WebViewActivity extends AppCompatActivity {
                 mainHandler.post(() -> {
                     Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
                     startActivity(intent);
-                    Toast.makeText(WebViewActivity.this, "请在无障碍里开启 Aion Oloth", Toast.LENGTH_LONG).show();
+                    Toast.makeText(WebViewActivity.this,
+                            "请在无障碍里开启 " + getString(R.string.app_name),
+                            Toast.LENGTH_LONG).show();
                 });
             }
 
@@ -216,7 +229,8 @@ public class WebViewActivity extends AppCompatActivity {
 
         // 原生 BLE 桥接（绕过 WebView 不支持 Web Bluetooth API 的限制）
         webView.addJavascriptInterface(new BleBridge(webView, this), "AionBle");
-        webView.addJavascriptInterface(new AionRingBleBridge(webView, this), "AionRingBle");
+        ringBleBridge = new AionRingBleBridge(webView, this);
+        webView.addJavascriptInterface(ringBleBridge, "AionRingBle");
 
         // 图片保存桥接（WebView 不支持 blob URL 下载，用原生方法写入相册）
         webView.addJavascriptInterface(new Object() {
@@ -240,6 +254,39 @@ public class WebViewActivity extends AppCompatActivity {
             }
         }, "AionImageSaver");
 
+        // Bounded replay cache controls. The settings page may call these
+        // through the top-level WebView bridge without involving the server.
+        webView.addJavascriptInterface(new Object() {
+            @JavascriptInterface
+            public String getInfo() {
+                return mediaCacheStore.getInfo().toString();
+            }
+
+            @JavascriptInterface
+            public void setLimitMb(int limitMb) {
+                mediaCacheStore.setLimitMb(limitMb);
+            }
+
+            @JavascriptInterface
+            public void clear() {
+                mediaCacheStore.clear();
+            }
+        }, "AppMediaCache");
+
+        // Small JSON snapshots shared by every connection origin. This avoids
+        // localStorage's LAN/Tailscale/Cloudflare origin isolation.
+        webView.addJavascriptInterface(new Object() {
+            @JavascriptInterface
+            public String get(String key) {
+                return sharedJsonStore.get(key);
+            }
+
+            @JavascriptInterface
+            public void put(String key, String value) {
+                sharedJsonStore.put(key, value);
+            }
+        }, "AppSharedData");
+
         // 权限请求延迟到页面加载完成后，避免系统弹窗阻塞 WebView 加载
         // 见 onPageFinished → requestPermissionsSequentially()
 
@@ -249,13 +296,23 @@ public class WebViewActivity extends AppCompatActivity {
         s.setDatabaseEnabled(true);
         s.setMediaPlaybackRequiresUserGesture(false); // 允许自动播放音频（TTS / 闹铃）
         s.setAllowFileAccess(true);
-        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        s.setCacheMode(WebSettings.LOAD_NO_CACHE);  // 不使用 HTTP 缓存（静态资源走本地 assets）
+        // HTTPS/Cloudflare 页面禁止降级加载 HTTP 子资源；纯 HTTP 的 LAN/Tailscale
+        // 顶层页面不属于 mixed content，因此两条私网线路不受影响。
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        // Allow WebView to revalidate normal responses. Verified frontend and
+        // visual assets use SharedAssetCache, which is independent of hostname.
+        s.setCacheMode(WebSettings.LOAD_DEFAULT);
         s.setUserAgentString(s.getUserAgentString() + " AionChatApp/1.0");
+
+        CookieManager cookieManager = CookieManager.getInstance();
+        cookieManager.setAcceptCookie(true);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            cookieManager.setAcceptThirdPartyCookies(webView, true);
+        }
 
         // 让 WebView 的渲染和真实 Chrome 保持一致
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            webView.getSettings().setSafeBrowsingEnabled(false);
+            webView.getSettings().setSafeBrowsingEnabled(true);
         }
 
         webView.setWebViewClient(new WebViewClient() {
@@ -279,7 +336,7 @@ public class WebViewActivity extends AppCompatActivity {
                 }
                 // 站内导航留在 WebView，外部链接用浏览器打开
                 String urlHost = request.getUrl().getHost();
-                if (urlHost != null && (urlHost.contains("192.168.") || urlHost.contains("100.117.") || urlHost.contains("localhost") || urlHost.contains("127.0.0.1"))) {
+                if (isAllowedInWebViewHost(urlHost)) {
                     return false;
                 }
                 startActivity(new Intent(Intent.ACTION_VIEW, request.getUrl()));
@@ -289,39 +346,14 @@ public class WebViewActivity extends AppCompatActivity {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 String path = request.getUrl().getPath();
+                String host = request.getUrl().getHost();
                 if (path == null) return super.shouldInterceptRequest(view, request);
-
-                // 匹配 /public/* 和 /static/*.js|css|json 的请求
-                String assetPath = null;
-                if (path.startsWith("/public/")) {
-                    // 排除 wallpaper/ 目录（用户动态内容）和上传目录
-                        // 排除可能随时更换的前端资源
-                    String sub = path.substring(8); // 去掉 "/public/"
-                    if (!sub.startsWith("wallpaper/")
-                            && !sub.equals("AIIcon.png")
-                            && !sub.equals("UserIcon.png")
-                            && !sub.equals("chat-bg-light.jpg")
-                            && !sub.equals("chat-bg-dark.jpg")
-                            && !sub.equals("视频来电头像.jpg")) {
-                        assetPath = "public/" + sub;
-                    }
-                } else if (path.startsWith("/static/") && !path.endsWith(".html")) {
-                    // 只拦截 js/css/json，不拦截 HTML（HTML 经常更新）
-                    String sub = path.substring(8);
-                    if (sub.endsWith(".js") || sub.endsWith(".css") || sub.equals("manifest.json") || sub.equals("sw.js")) {
-                        assetPath = "static/" + sub;
-                    }
-                }
-
-                if (assetPath != null) {
-                    try {
-                        InputStream is = getAssets().open(assetPath);
-                        String mime = guessMimeType(assetPath);
-                        return new WebResourceResponse(mime, "UTF-8", is);
-                    } catch (IOException e) {
-                        // 本地没有此文件，回退到网络加载
-                    }
-                }
+                if (!isAionContentHost(host)) return super.shouldInterceptRequest(view, request);
+                WebResourceResponse cached = sharedAssetCache.intercept(
+                        request.getUrl(), request.getRequestHeaders());
+                if (cached != null) return cached;
+                WebResourceResponse media = mediaCacheStore.intercept(request);
+                if (media != null) return media;
                 return super.shouldInterceptRequest(view, request);
             }
 
@@ -343,6 +375,10 @@ public class WebViewActivity extends AppCompatActivity {
                         permissionsRequested = true;
                         mainHandler.postDelayed(() -> requestPermissionsSequentially(0), 1500);
                     }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                        CookieManager.getInstance().flush();
+                    }
+                    notifyCloudflareAuthReady(url);
                 }
             }
 
@@ -417,11 +453,38 @@ public class WebViewActivity extends AppCompatActivity {
         });
 
         // 加载目标 URL
-        targetUrl = getIntent().getStringExtra("url");
+        targetUrl = ConnectionEndpoint.normalizePageUrl(getIntent().getStringExtra("url"));
         if (targetUrl == null || targetUrl.isEmpty()) {
             targetUrl = "http://192.168.xx.xxx:8080/chat";
         }
+        // Prefer a fresh manifest before the first page load. A short timeout
+        // keeps authentication portals and unreachable routes responsive.
+        sharedAssetCache.refreshManifest(targetUrl,
+                refreshed -> mainHandler.post(this::loadTargetUrlOnce));
+        mainHandler.postDelayed(this::loadTargetUrlOnce, 1200);
+    }
+
+    private void loadTargetUrlOnce() {
+        if (initialPageLoadStarted || webView == null) return;
+        initialPageLoadStarted = true;
+        sharedAssetCache.freezeForPageLoad();
         webView.loadUrl(targetUrl);
+    }
+
+    private boolean isAionContentHost(String host) {
+        return ConnectionEndpoint.isAllowedContentHost(host, targetUrl);
+    }
+
+    private boolean isAllowedInWebViewHost(String host) {
+        return isAionContentHost(host)
+                || isCloudflareAccessHost(host);
+    }
+
+    private boolean isCloudflareAccessHost(String host) {
+        return host != null
+                && (CLOUDFLARE_ACCESS_HOST.equalsIgnoreCase(host)
+                || host.toLowerCase(java.util.Locale.ROOT)
+                        .endsWith("." + CLOUDFLARE_ACCESS_HOST));
     }
 
     private boolean isAionAccessibilityEnabled() {
@@ -659,7 +722,7 @@ public class WebViewActivity extends AppCompatActivity {
 
     private void showExitDialog() {
         new AlertDialog.Builder(this, R.style.Theme_AionChat_Dialog)
-            .setTitle("Aion Oloth")
+            .setTitle(getString(R.string.app_name))
             .setMessage("要切换连接地址还是退出？")
             .setPositiveButton("切换地址", (d, w) -> {
                 SharedPreferences prefs = getSharedPreferences("aion_prefs", MODE_PRIVATE);
@@ -705,6 +768,27 @@ public class WebViewActivity extends AppCompatActivity {
         startService(intent);
     }
 
+    private void notifyCloudflareAuthReady(String pageUrl) {
+        try {
+            Uri uri = Uri.parse(pageUrl);
+            if (!ConnectionEndpoint.isCloudflareHost(uri.getHost())) return;
+            String cookie = CookieManager.getInstance()
+                    .getCookie(ConnectionEndpoint.CLOUDFLARE_COOKIE_URL);
+            if (!ConnectionEndpoint.hasCloudflareAccessCookie(cookie)) return;
+            Intent intent = new Intent(this, AionPushService.class);
+            intent.putExtra("action", AionPushService.ACTION_REFRESH_CLOUDFLARE_AUTH);
+            startService(intent);
+            sharedAssetCache.refreshManifest(pageUrl, refreshed -> {
+                if (refreshed) {
+                    android.util.Log.i("SharedAssetCache", "Cloudflare manifest refreshed");
+                }
+            });
+        } catch (Exception e) {
+            android.util.Log.w("AionWebView", "Cloudflare auth sync failed: "
+                    + e.getClass().getSimpleName());
+        }
+    }
+
     private void requestBatteryOptimization() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
@@ -741,6 +825,11 @@ public class WebViewActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         mainHandler.removeCallbacksAndMessages(null);
+        if (ringBleBridge != null) {
+            ringBleBridge.close();
+            ringBleBridge = null;
+        }
+        if (mediaCacheStore != null) mediaCacheStore.shutdown();
         if (webView != null) {
             webView.destroy();
         }

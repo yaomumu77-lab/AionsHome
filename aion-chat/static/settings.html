@@ -8,81 +8,628 @@
 <link rel="manifest" href="/manifest.json">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#ff8359">
+<style>
+.settings-page.sub-page {
+  max-width: none;
+  width: 100%;
+  margin: 0;
+}
+.settings-content {
+  max-width: none;
+  width: 100%;
+  margin: 0;
+  padding-left: clamp(16px, 3vw, 28px);
+  padding-right: clamp(16px, 3vw, 28px);
+  padding-bottom: 120px;
+}
+.settings-dock {
+  position: fixed;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  z-index: 100;
+  width: min(760px, calc(100vw - 32px));
+  padding: 9px;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 999px;
+  background: rgba(10,12,34,.9);
+  box-shadow: 0 18px 44px rgba(0,0,0,.36);
+  backdrop-filter: blur(14px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.dock-actions {
+  display: flex;
+  gap: 9px;
+  width: 100%;
+}
+.action-btn {
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 999px;
+  padding: 10px 16px;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: .01em;
+  cursor: pointer;
+  background: rgba(255,255,255,.07);
+  transition: transform .15s ease, box-shadow .15s ease, background .15s ease;
+}
+.settings-dock .action-btn {
+  flex: 1;
+}
+.action-btn:hover {
+  transform: translateY(-1px);
+  background: rgba(255,255,255,.11);
+}
+.action-btn.primary {
+  border-color: rgba(255,255,255,.25);
+  background: linear-gradient(135deg, #8b5cf6, #ff8359);
+  box-shadow: 0 10px 26px rgba(139,92,246,.26);
+}
+.action-btn.secondary {
+  color: rgba(255,255,255,.78);
+}
+.action-btn.add {
+  padding: 9px 14px;
+  background: rgba(139,92,246,.18);
+  border-color: rgba(139,92,246,.32);
+}
+.settings-card {
+  margin: 12px 0;
+  border: 1px solid rgba(255,255,255,0.09);
+  border-radius: 18px;
+  background: rgba(255,255,255,0.045);
+  box-shadow: 0 12px 36px rgba(0,0,0,0.16);
+  overflow: hidden;
+}
+.settings-card summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 16px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  user-select: none;
+}
+.settings-card summary::-webkit-details-marker { display: none; }
+.summary-title {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.summary-title strong {
+  color: #fff;
+  font-size: 16px;
+  letter-spacing: .01em;
+}
+.summary-title span {
+  color: rgba(255,255,255,0.56);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.summary-chevron {
+  color: rgba(255,255,255,0.55);
+  transition: transform .18s ease;
+}
+.settings-card[open] .summary-chevron { transform: rotate(90deg); }
+.card-body {
+  padding: 0 18px 18px;
+}
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 13px 14px;
+}
+.settings-grid.compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.field {
+  min-width: 0;
+}
+.field.full {
+  grid-column: 1 / -1;
+}
+.field .form-label {
+  margin-top: 0;
+  display: block;
+}
+.mono-input {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+.hint {
+  margin: 0 0 12px 0;
+  color: rgba(255,255,255,0.58);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.sub-block {
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 15px;
+  padding: 14px;
+  background: rgba(0,0,0,0.12);
+}
+.sub-block + .sub-block {
+  margin-top: 12px;
+}
+.sub-title {
+  margin: 0 0 6px;
+  color: #ffad8c;
+  font-size: 14px;
+  font-weight: 700;
+}
+.route-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.route-card {
+  border: 1px solid rgba(255,255,255,0.09);
+  border-radius: 16px;
+  padding: 10px;
+  background: rgba(0,0,0,0.14);
+}
+.route-head, .model-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.route-title {
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.route-title small {
+  color: rgba(255,255,255,0.46);
+  font-size: 11px;
+  font-weight: 500;
+  margin-left: 8px;
+}
+.route-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+.ghost-btn {
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.78);
+  border-radius: 999px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-weight: 650;
+  transition: background .15s ease, transform .15s ease;
+}
+.ghost-btn:hover {
+  background: rgba(255,255,255,0.1);
+  transform: translateY(-1px);
+}
+.danger-btn {
+  color: #ffb6a6;
+}
+.route-icon-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.route-toggle span {
+  display: inline-block;
+  transition: transform .18s ease;
+}
+.route-toggle.is-open span {
+  transform: rotate(90deg);
+}
+.route-models {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+}
+.route-body.is-collapsed {
+  display: none;
+}
+.route-config-grid {
+  display: grid;
+  grid-template-columns: minmax(120px, .75fr) minmax(220px, 1.45fr) minmax(160px, 1fr);
+  gap: 8px;
+}
+.route-field {
+  min-width: 0;
+}
+.route-field span,
+.model-index {
+  display: block;
+  margin: 0 0 4px;
+  color: rgba(255,255,255,0.48);
+  font-size: 11px;
+  line-height: 1.2;
+}
+.route-card .form-input {
+  min-height: 36px;
+  padding: 8px 10px;
+  margin: 0;
+}
+.model-list {
+  display: grid;
+  gap: 8px;
+}
+.model-card {
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 14px;
+  padding: 8px;
+  background: rgba(255,255,255,0.035);
+}
+.model-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+.model-index {
+  margin: 0;
+  font-weight: 700;
+  color: rgba(255,255,255,0.62);
+}
+.model-card-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.model-card-fields {
+  display: grid;
+  grid-template-columns: minmax(120px, .9fr) minmax(180px, 1.25fr);
+  gap: 7px;
+}
+.check-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(255,255,255,0.76);
+  font-size: 13px;
+  padding-bottom: 10px;
+  white-space: nowrap;
+}
+.vision-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.035);
+  color: rgba(255,255,255,0.76);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.vision-toggle input {
+  width: 14px;
+  height: 14px;
+  accent-color: #19b8b8;
+}
+.model-delete {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+}
+.add-model-row {
+  margin-top: 8px;
+}
+.add-model-row .ghost-btn {
+  width: 100%;
+  min-height: 36px;
+}
+/* legacy fallback for older cached markup */
+.model-row .check-field {
+  justify-content: center;
+  height: 36px;
+  padding: 0;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.035);
+}
+.model-row .ghost-btn {
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 10px;
+}
+.check-field input {
+  width: 16px;
+  height: 16px;
+}
+.empty-route {
+  border: 1px dashed rgba(255,255,255,0.16);
+  border-radius: 15px;
+  padding: 18px;
+  color: rgba(255,255,255,0.58);
+  font-size: 13px;
+  text-align: center;
+}
+.section-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.settings-page .section-actions .btn-save,
+.settings-page .section-actions .btn-cancel {
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 999px;
+  padding: 9px 14px;
+  min-height: 38px;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  box-shadow: none;
+  cursor: pointer;
+}
+.settings-page .section-actions .btn-save {
+  background: linear-gradient(135deg, rgba(139,92,246,.88), rgba(255,131,89,.72));
+}
+.settings-page .section-actions .btn-cancel {
+  background: rgba(255,255,255,.07);
+}
+.settings-page .section-actions .btn-save:hover,
+.settings-page .section-actions .btn-cancel:hover {
+  transform: translateY(-1px);
+}
+body[data-theme="light"] .summary-title span,
+body[data-theme="light"] .hint,
+body[data-theme="light"] .empty-route,
+body[data-theme="light"] .check-field,
+body[data-theme="light"] .route-field span,
+body[data-theme="light"] .model-index,
+body[data-theme="light"] .route-title small {
+  color: rgba(31,42,68,0.68);
+}
+body[data-theme="light"] .settings-card,
+body[data-theme="light"] .route-card,
+body[data-theme="light"] .sub-block,
+body[data-theme="light"] .settings-dock {
+  border-color: rgba(70,92,140,0.12);
+  background: rgba(244,247,255,.9);
+}
+body[data-theme="light"] .summary-title strong,
+body[data-theme="light"] .route-title {
+  color: #24304f;
+}
+body[data-theme="light"] .action-btn.secondary {
+  color: rgba(31,42,68,.75);
+  background: rgba(255,255,255,.65);
+}
+body[data-theme="light"] .ghost-btn {
+  color: rgba(31,42,68,.76);
+  background: rgba(255,255,255,.62);
+}
+@media (max-width: 720px) {
+  .settings-grid,
+  .settings-grid.compact,
+  .route-config-grid,
+  .model-card-fields {
+    grid-template-columns: 1fr;
+  }
+  .settings-card summary {
+    align-items: flex-start;
+  }
+  .settings-dock {
+    width: calc(100vw - 20px);
+    bottom: 10px;
+  }
+}
+</style>
 </head>
 <body>
-<div class="sub-page">
+<div class="sub-page settings-page">
   <div class="top-bar">
     <button class="back-btn" onclick="location.href='/'">⬅</button>
     <h2>⚙ 设置</h2>
   </div>
-  <div class="page-content">
-    <label class="form-label">Gemini API Key</label>
-    <input class="form-input" type="text" id="geminiKeyInput" placeholder="输入 Gemini API Key..." autocomplete="off" style="font-family:monospace">
-    <label class="form-label">Gemini Free Key（哨兵+向量）</label>
-    <input class="form-input" type="text" id="geminiFreeKeyInput" placeholder="留空则复用上方 Key" autocomplete="off" style="font-family:monospace">
-
-    <div style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08)">
-      <label class="form-label" style="font-size:15px;color:#ff8359">🛡 前置 & 哨兵模型（自定义中转站）</label>
-      <p style="font-size:12px;color:#aaa;margin:2px 0 10px 0">留空则默认走 Gemini 官方 API + 上方 Free Key</p>
-      <label class="form-label">API 地址（Base URL）</label>
-      <input class="form-input" type="text" id="sentinelBaseUrlInput" placeholder="例：https://api.siliconflow.cn" autocomplete="off" style="font-family:monospace">
-      <label class="form-label">API Key</label>
-      <input class="form-input" type="text" id="sentinelApiKeyInput" placeholder="中转站 / 硅基流动的 API Key" autocomplete="off" style="font-family:monospace">
-      <label class="form-label">模型名称</label>
-      <input class="form-input" type="text" id="sentinelModelInput" placeholder="例：Qwen/Qwen3.6-35B-A3B" autocomplete="off" style="font-family:monospace">
-    </div>
-
-    <div style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08)">
-      <label class="form-label" style="font-size:15px;color:#ff8359">📐 向量模型（记忆库 Embedding）</label>
-      <p style="font-size:12px;color:#aaa;margin:2px 0 10px 0">留空则默认走 Gemini embedding-001。切换模型后维度可能不同，需重建向量（记忆库→手动总结）</p>
-      <label class="form-label">API 地址（Base URL）</label>
-      <input class="form-input" type="text" id="embeddingBaseUrlInput" placeholder="例：https://api.siliconflow.cn" autocomplete="off" style="font-family:monospace">
-      <label class="form-label">API Key</label>
-      <input class="form-input" type="text" id="embeddingApiKeyInput" placeholder="留空则复用 Gemini Free Key" autocomplete="off" style="font-family:monospace">
-      <label class="form-label">模型名称</label>
-      <input class="form-input" type="text" id="embeddingModelInput" placeholder="例：Qwen/Qwen3-Embedding-8B" autocomplete="off" style="font-family:monospace">
-    </div>
-
-    <div style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08)">
-      <label class="form-label" style="font-size:15px;color:#ff8359">📱 手机屏幕监督</label>
-      <p style="font-size:12px;color:#aaa;margin:2px 0 10px 0">Android App 可开启。MediaProjection 在线时优先用共享屏幕；无障碍开启后，可在共享掉线时继续截普通界面。</p>
-      <p id="phoneScreenStatus" style="font-size:12px;color:#aaa;margin:2px 0 10px 0"></p>
-      <div class="btn-row" style="justify-content:flex-start;margin-top:8px">
-        <button class="btn-save" type="button" onclick="enablePhoneScreenSupervision()">共享授权</button>
-        <button class="btn-save" type="button" onclick="openPhoneAccessibilitySettings()">无障碍设置</button>
-        <button class="btn-save" type="button" onclick="testPhoneAccessibilityCapture()">测试截图</button>
-        <button class="btn-cancel" type="button" onclick="disablePhoneScreenSupervision()">关闭</button>
+  <div class="page-content settings-content">
+    <div class="settings-dock">
+      <div class="dock-actions">
+        <button class="action-btn secondary" onclick="location.href='/'">取消</button>
+        <button class="action-btn primary" onclick="saveSettings()">保存全部设置</button>
       </div>
     </div>
 
-    <label class="form-label">硅基流动 API Key</label>
-    <input class="form-input" type="text" id="sfKeyInput" placeholder="输入硅基流动 API Key..." autocomplete="off" style="font-family:monospace">
-    <label class="form-label">中转站 API Key</label>
-    <input class="form-input" type="text" id="aiproKeyInput" placeholder="输入中转站 API Key..." autocomplete="off" style="font-family:monospace">
-    <label class="form-label">网易云 MUSIC_U Cookie（VIP 点歌）</label>
-    <input class="form-input" type="text" id="neteaseMusicUInput" placeholder="浏览器 F12 → Cookie → MUSIC_U" autocomplete="off" style="font-family:monospace">
+    <details class="settings-card" open>
+      <summary>
+        <div class="summary-title">
+          <strong>🔑 API 与基础账号</strong>
+          <span>官方 Key、内置硅基模型、音乐 Cookie</span>
+        </div>
+        <span class="summary-chevron">›</span>
+      </summary>
+      <div class="card-body settings-grid">
+        <div class="field">
+          <label class="form-label">Gemini API Key</label>
+          <input class="form-input mono-input" type="text" id="geminiKeyInput" placeholder="输入 Gemini API Key..." autocomplete="off">
+        </div>
+        <div class="field">
+          <label class="form-label">Gemini Free Key（哨兵+向量）</label>
+          <input class="form-input mono-input" type="text" id="geminiFreeKeyInput" placeholder="留空则复用上方 Key" autocomplete="off">
+        </div>
+        <div class="field">
+          <label class="form-label">硅基流动 API Key</label>
+          <input class="form-input mono-input" type="text" id="sfKeyInput" placeholder="输入硅基流动 API Key..." autocomplete="off">
+        </div>
+        <div class="field full">
+          <label class="form-label">网易云 MUSIC_U Cookie（VIP 点歌）</label>
+          <input class="form-input mono-input" type="text" id="neteaseMusicUInput" placeholder="浏览器 F12 → Cookie → MUSIC_U" autocomplete="off">
+        </div>
+      </div>
+    </details>
 
-    <div style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08)">
-      <label class="form-label" style="font-size:15px;color:#ff8359">瑞幸咖啡 MCP</label>
-      <label class="form-label" style="display:flex;align-items:center;gap:8px;font-size:13px">
-        <input type="checkbox" id="luckinMcpEnabledInput" style="width:16px;height:16px">
-        启用瑞幸咖啡下单能力
-      </label>
-      <p style="font-size:12px;color:#aaa;margin:2px 0 10px 0">支付仍由你确认；系统只创建待支付订单并返回支付链接或二维码。</p>
-      <label class="form-label">MCP Token</label>
-      <input class="form-input" type="text" id="luckinMcpTokenInput" placeholder="从瑞幸开放平台复制 Bearer Token" autocomplete="off" style="font-family:monospace">
-      <label class="form-label">默认经度</label>
-      <input class="form-input" type="text" id="luckinLongitudeInput" placeholder="例如 116.397128" autocomplete="off" style="font-family:monospace">
-      <label class="form-label">默认纬度</label>
-      <input class="form-input" type="text" id="luckinLatitudeInput" placeholder="例如 39.916527" autocomplete="off" style="font-family:monospace">
-      <label class="form-label">默认门店关键词（可选）</label>
-      <input class="form-input" type="text" id="luckinShopKeywordInput" placeholder="例如 写字楼名 / 商场名 / 门店名" autocomplete="off">
-    </div>
+    <details class="settings-card" open>
+      <summary>
+        <div class="summary-title">
+          <strong>🧭 自定义主模型线路</strong>
+          <span>添加多个 OpenAI 兼容中转站，每条线路下可放多个模型</span>
+        </div>
+        <span class="summary-chevron">›</span>
+      </summary>
+      <div class="card-body">
+        <p class="hint">Base URL 可填根域名或 <code>/v1</code>；显示名会进入模型列表。</p>
+        <div id="customRoutesList" class="route-list"></div>
+        <div class="section-actions">
+          <button class="action-btn add" type="button" onclick="addCustomRoute()">＋ 添加线路</button>
+        </div>
+      </div>
+    </details>
 
-    <div class="btn-row">
-      <button class="btn-cancel" onclick="location.href='/'">取消</button>
-      <button class="btn-save" onclick="saveSettings()">保存</button>
-    </div>
+    <details class="settings-card">
+      <summary>
+        <div class="summary-title">
+          <strong>🛡 哨兵与向量模型</strong>
+          <span>前置图片识别、位置/监控哨兵、记忆库 Embedding</span>
+        </div>
+        <span class="summary-chevron">›</span>
+      </summary>
+      <div class="card-body">
+        <div class="sub-block">
+          <p class="sub-title">前置 & 哨兵模型（自定义中转站）</p>
+          <p class="hint">留空则默认走 Gemini 官方 API + 上方 Free Key。</p>
+          <div class="settings-grid">
+            <div class="field">
+              <label class="form-label">API 地址（Base URL）</label>
+              <input class="form-input mono-input" type="text" id="sentinelBaseUrlInput" placeholder="例：https://api.siliconflow.cn" autocomplete="off">
+            </div>
+            <div class="field">
+              <label class="form-label">API Key</label>
+              <input class="form-input mono-input" type="text" id="sentinelApiKeyInput" placeholder="中转站 / 硅基流动的 API Key" autocomplete="off">
+            </div>
+            <div class="field full">
+              <label class="form-label">模型名称</label>
+              <input class="form-input mono-input" type="text" id="sentinelModelInput" placeholder="例：Qwen/Qwen3.6-35B-A3B" autocomplete="off">
+            </div>
+          </div>
+        </div>
+        <div class="sub-block">
+          <p class="sub-title">向量模型（记忆库 Embedding）</p>
+          <p class="hint">留空则默认走 Gemini embedding-001。切换模型后维度可能不同，需重建向量（记忆库 → 手动总结）。</p>
+          <div class="settings-grid">
+            <div class="field">
+              <label class="form-label">API 地址（Base URL）</label>
+              <input class="form-input mono-input" type="text" id="embeddingBaseUrlInput" placeholder="例：https://api.siliconflow.cn" autocomplete="off">
+            </div>
+            <div class="field">
+              <label class="form-label">API Key</label>
+              <input class="form-input mono-input" type="text" id="embeddingApiKeyInput" placeholder="留空则复用 Gemini Free Key" autocomplete="off">
+            </div>
+            <div class="field full">
+              <label class="form-label">模型名称</label>
+              <input class="form-input mono-input" type="text" id="embeddingModelInput" placeholder="例：Qwen/Qwen3-Embedding-8B" autocomplete="off">
+            </div>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="settings-card">
+      <summary>
+        <div class="summary-title">
+          <strong>📱 手机屏幕监督</strong>
+          <span>Android 共享屏幕、无障碍截图与测试</span>
+        </div>
+        <span class="summary-chevron">›</span>
+      </summary>
+      <div class="card-body">
+        <p class="hint">Android App 可开启。MediaProjection 在线时优先用共享屏幕；无障碍开启后，可在共享掉线时继续截普通界面。</p>
+        <p id="phoneScreenStatus" class="hint"></p>
+        <div class="section-actions">
+          <button class="btn-save" type="button" onclick="enablePhoneScreenSupervision()">共享授权</button>
+          <button class="btn-save" type="button" onclick="openPhoneAccessibilitySettings()">无障碍设置</button>
+          <button class="btn-save" type="button" onclick="testPhoneAccessibilityCapture()">测试截图</button>
+          <button class="btn-cancel" type="button" onclick="disablePhoneScreenSupervision()">关闭</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="settings-card">
+      <summary>
+        <div class="summary-title">
+          <strong>☕ 瑞幸咖啡 MCP</strong>
+          <span>下单能力、Token、默认定位与门店关键词</span>
+        </div>
+        <span class="summary-chevron">›</span>
+      </summary>
+      <div class="card-body">
+        <label class="check-field">
+          <input type="checkbox" id="luckinMcpEnabledInput">
+          启用瑞幸咖啡下单能力
+        </label>
+        <p class="hint">支付仍由你确认；系统只创建待支付订单并返回支付链接或二维码。</p>
+        <div class="settings-grid">
+          <div class="field full">
+            <label class="form-label">MCP Token</label>
+            <input class="form-input mono-input" type="text" id="luckinMcpTokenInput" placeholder="从瑞幸开放平台复制 Bearer Token" autocomplete="off">
+          </div>
+          <div class="field">
+            <label class="form-label">默认经度</label>
+            <input class="form-input mono-input" type="text" id="luckinLongitudeInput" placeholder="例如 116.397128" autocomplete="off">
+          </div>
+          <div class="field">
+            <label class="form-label">默认纬度</label>
+            <input class="form-input mono-input" type="text" id="luckinLatitudeInput" placeholder="例如 39.916527" autocomplete="off">
+          </div>
+          <div class="field full">
+            <label class="form-label">默认门店关键词（可选）</label>
+            <input class="form-input" type="text" id="luckinShopKeywordInput" placeholder="例如 写字楼名 / 商场名 / 门店名" autocomplete="off">
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details id="mediaCacheSection" class="settings-card" style="display:none">
+      <summary>
+        <div class="summary-title">
+          <strong>🧹 手机媒体缓存</strong>
+          <span>语音、图片、视频缓存上限与清理</span>
+        </div>
+        <span class="summary-chevron">›</span>
+      </summary>
+      <div class="card-body">
+        <p id="mediaCacheStatus" class="hint">正在读取缓存占用…</p>
+        <div class="settings-grid">
+          <div class="field">
+            <label class="form-label">空间上限</label>
+            <select class="form-input" id="mediaCacheLimitInput">
+              <option value="256">256 MB</option>
+              <option value="512">512 MB</option>
+              <option value="1024">1 GB（推荐）</option>
+              <option value="2048">2 GB</option>
+            </select>
+          </div>
+          <div class="field full">
+            <p class="hint">超过上限后自动从最久未使用的语音、图片和视频开始清理，并保留聊天记录。</p>
+          </div>
+        </div>
+        <div class="section-actions">
+          <button class="btn-save" type="button" onclick="saveMediaCacheLimit()">应用上限</button>
+          <button class="btn-cancel" type="button" onclick="clearMediaCache()">清理媒体缓存</button>
+        </div>
+      </div>
+    </details>
+
   </div>
 </div>
 <script src="/static/theme.js?v=theme-20260606"></script>
@@ -90,8 +637,209 @@
 <script>
 connectCommonWS();
 
+var customModelRoutes = [];
+
+function escHtml(value) {
+  var div = document.createElement("div");
+  div.textContent = value == null ? "" : String(value);
+  return div.innerHTML;
+}
+
+function escAttr(value) {
+  return escHtml(value).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function makeRouteId() {
+  return "custom_route_" + Date.now() + "_" + Math.random().toString(16).slice(2, 8);
+}
+
+function newCustomModel() {
+  return { key: "", model: "", vision: true };
+}
+
+function newCustomRoute() {
+  return { id: makeRouteId(), name: "", base_url: "", api_key: "", models: [newCustomModel()], collapsed: false };
+}
+
+function currentRouteCollapsedState() {
+  var state = {};
+  customModelRoutes.forEach(function(route) {
+    if (route && route.id) state[route.id] = !!route.collapsed;
+  });
+  return state;
+}
+
+function normalizeRoutesForUi(routes, collapsedState) {
+  if (!Array.isArray(routes)) return [];
+  return routes.map(function(route, idx) {
+    var id = route.id || "custom_route_" + (idx + 1);
+    var hasSavedState = collapsedState && Object.prototype.hasOwnProperty.call(collapsedState, id);
+    return {
+      id: id,
+      name: route.name || "",
+      base_url: route.base_url || "",
+      api_key: route.api_key || "",
+      collapsed: hasSavedState ? !!collapsedState[id] : true,
+      models: Array.isArray(route.models) && route.models.length
+        ? route.models.map(function(model) {
+            return {
+              key: model.key || model.name || model.model || "",
+              model: model.model || model.model_id || "",
+              vision: model.vision !== false
+            };
+          })
+        : [newCustomModel()]
+    };
+  });
+}
+
+function renderCustomRoutes() {
+  var list = $("customRoutesList");
+  if (!list) return;
+  if (!customModelRoutes.length) {
+    list.innerHTML = '<div class="empty-route">还没有自定义线路。点“添加线路”，把中转站地址和模型加进来。</div>';
+    return;
+  }
+  list.innerHTML = customModelRoutes.map(function(route, routeIndex) {
+    var collapsed = !!route.collapsed;
+    var modelsHtml = route.models.map(function(model, modelIndex) {
+      return '' +
+        '<div class="model-card">' +
+          '<div class="model-card-head">' +
+            '<span class="model-index">模型 ' + (modelIndex + 1) + '</span>' +
+            '<div class="model-card-actions">' +
+              '<label class="vision-toggle">' +
+                '<input type="checkbox" ' + (model.vision !== false ? "checked" : "") + ' onchange="updateCustomRouteModel(' + routeIndex + ', ' + modelIndex + ', \'vision\', this.checked)">' +
+                '可看图' +
+              '</label>' +
+              '<button class="ghost-btn danger-btn model-delete" type="button" title="删除模型" onclick="removeCustomModel(' + routeIndex + ', ' + modelIndex + ')">×</button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="model-card-fields">' +
+            '<input class="form-input" type="text" value="' + escAttr(model.key) + '" placeholder="显示名，例如 哈基米-gemini-3.1" oninput="updateCustomRouteModel(' + routeIndex + ', ' + modelIndex + ', \'key\', this.value)">' +
+            '<input class="form-input mono-input" type="text" value="' + escAttr(model.model) + '" placeholder="模型 ID，例如 gemini-3.1-pro-high" oninput="updateCustomRouteModel(' + routeIndex + ', ' + modelIndex + ', \'model\', this.value)">' +
+          '</div>' +
+        '</div>';
+    }).join("");
+    return '' +
+      '<div class="route-card">' +
+        '<div class="route-head">' +
+          '<div class="route-title">线路 ' + (routeIndex + 1) + (route.name ? ' · ' + escHtml(route.name) : '') + '<small>' + route.models.length + ' 个模型</small></div>' +
+          '<div class="route-actions">' +
+            '<button class="ghost-btn route-icon-btn route-toggle ' + (collapsed ? '' : 'is-open') + '" type="button" title="' + (collapsed ? '展开' : '收起') + '" onclick="toggleCustomRoute(' + routeIndex + ')"><span>›</span></button>' +
+            '<button class="ghost-btn route-icon-btn danger-btn" type="button" title="删除线路" onclick="removeCustomRoute(' + routeIndex + ')">×</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="route-body ' + (collapsed ? 'is-collapsed' : '') + '">' +
+          '<div class="route-config-grid">' +
+            '<label class="route-field">' +
+              '<span>线路名称</span>' +
+              '<input class="form-input" type="text" value="' + escAttr(route.name) + '" placeholder="例：红豆沙 / 冰可乐 / OpenRouter" oninput="updateCustomRoute(' + routeIndex + ', \'name\', this.value)">' +
+            '</label>' +
+            '<label class="route-field">' +
+              '<span>Base URL</span>' +
+              '<input class="form-input mono-input" type="text" value="' + escAttr(route.base_url) + '" placeholder="https://example.com 或 https://example.com/v1" oninput="updateCustomRoute(' + routeIndex + ', \'base_url\', this.value)">' +
+            '</label>' +
+            '<label class="route-field">' +
+              '<span>API Key</span>' +
+              '<input class="form-input mono-input" type="text" value="' + escAttr(route.api_key) + '" placeholder="可留空；填写后作为 Bearer Token" oninput="updateCustomRoute(' + routeIndex + ', \'api_key\', this.value)">' +
+            '</label>' +
+          '</div>' +
+          '<div class="route-models">' +
+            '<div class="model-row-head">' +
+              '<div class="route-title">模型配置</div>' +
+            '</div>' +
+            '<div class="model-list">' +
+              modelsHtml +
+            '</div>' +
+            '<div class="add-model-row">' +
+              '<button class="ghost-btn" type="button" onclick="addCustomModel(' + routeIndex + ')">＋ 添加模型</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+  }).join("");
+}
+
+function updateCustomRoute(routeIndex, field, value) {
+  if (!customModelRoutes[routeIndex]) return;
+  customModelRoutes[routeIndex][field] = value;
+}
+
+function updateCustomRouteModel(routeIndex, modelIndex, field, value) {
+  var route = customModelRoutes[routeIndex];
+  if (!route || !route.models[modelIndex]) return;
+  route.models[modelIndex][field] = value;
+}
+
+function addCustomRoute() {
+  customModelRoutes.push(newCustomRoute());
+  renderCustomRoutes();
+}
+
+function toggleCustomRoute(routeIndex) {
+  if (!customModelRoutes[routeIndex]) return;
+  customModelRoutes[routeIndex].collapsed = !customModelRoutes[routeIndex].collapsed;
+  renderCustomRoutes();
+}
+
+function removeCustomRoute(routeIndex) {
+  customModelRoutes.splice(routeIndex, 1);
+  renderCustomRoutes();
+}
+
+function addCustomModel(routeIndex) {
+  var route = customModelRoutes[routeIndex];
+  if (!route) return;
+  route.models.push(newCustomModel());
+  renderCustomRoutes();
+}
+
+function removeCustomModel(routeIndex, modelIndex) {
+  var route = customModelRoutes[routeIndex];
+  if (!route) return;
+  route.models.splice(modelIndex, 1);
+  if (!route.models.length) route.models.push(newCustomModel());
+  renderCustomRoutes();
+}
+
+function collectCustomRoutes() {
+  var routes = [];
+  var seenModelKeys = new Set();
+  customModelRoutes.forEach(function(route, routeIndex) {
+    var name = (route.name || "").trim();
+    var baseUrl = (route.base_url || "").trim().replace(/\/+$/, "");
+    var apiKey = (route.api_key || "").trim();
+    var rawModels = Array.isArray(route.models) ? route.models : [];
+    var hasAnyValue = name || baseUrl || apiKey || rawModels.some(function(model) {
+      return (model.key || "").trim() || (model.model || "").trim();
+    });
+    if (!hasAnyValue) return;
+    if (!baseUrl) throw new Error("第 " + (routeIndex + 1) + " 条线路缺少 Base URL");
+    var models = [];
+    rawModels.forEach(function(model, modelIndex) {
+      var key = (model.key || "").trim();
+      var modelId = (model.model || "").trim();
+      if (!key && !modelId) return;
+      if (!key || !modelId) throw new Error("第 " + (routeIndex + 1) + " 条线路的第 " + (modelIndex + 1) + " 个模型需要同时填写显示名和模型 ID");
+      if (seenModelKeys.has(key)) throw new Error("模型显示名重复：" + key);
+      seenModelKeys.add(key);
+      models.push({ key: key, model: modelId, vision: model.vision !== false });
+    });
+    if (!models.length) throw new Error("第 " + (routeIndex + 1) + " 条线路至少需要一个模型");
+    routes.push({
+      id: route.id || makeRouteId(),
+      name: name || "自定义线路 " + (routeIndex + 1),
+      base_url: baseUrl,
+      api_key: apiKey,
+      models: models
+    });
+  });
+  return routes;
+}
+
 (async function init() {
-  const s = await api("GET", "/api/settings");
+  var s = await api("GET", "/api/settings");
   $("geminiKeyInput").value = s.gemini_key || "";
   $("geminiFreeKeyInput").value = s.gemini_free_key || "";
   $("sentinelBaseUrlInput").value = s.sentinel_base_url || "";
@@ -101,17 +849,27 @@ connectCommonWS();
   $("embeddingApiKeyInput").value = s.embedding_api_key || "";
   $("embeddingModelInput").value = s.embedding_model || "";
   $("sfKeyInput").value = s.siliconflow_key || "";
-  $("aiproKeyInput").value = s.aipro_key || "";
   $("neteaseMusicUInput").value = s.netease_music_u || "";
   $("luckinMcpEnabledInput").checked = !!s.luckin_mcp_enabled;
   $("luckinMcpTokenInput").value = s.luckin_mcp_token || "";
   $("luckinLongitudeInput").value = s.luckin_default_longitude || "";
   $("luckinLatitudeInput").value = s.luckin_default_latitude || "";
   $("luckinShopKeywordInput").value = s.luckin_default_shop_keyword || "";
+  customModelRoutes = normalizeRoutesForUi(s.custom_model_routes || []);
+  renderCustomRoutes();
   refreshPhoneScreenStatus();
+  refreshMediaCacheStatus();
 })();
 
 async function saveSettings() {
+  var customRoutes = [];
+  try {
+    customRoutes = collectCustomRoutes();
+  } catch (err) {
+    showToast(err.message || "自定义模型线路填写不完整");
+    return;
+  }
+  var collapsedState = currentRouteCollapsedState();
   await api("PUT", "/api/settings", {
     gemini_key: $("geminiKeyInput").value.trim(),
     gemini_free_key: $("geminiFreeKeyInput").value.trim(),
@@ -122,19 +880,21 @@ async function saveSettings() {
     embedding_api_key: $("embeddingApiKeyInput").value.trim(),
     embedding_model: $("embeddingModelInput").value.trim(),
     siliconflow_key: $("sfKeyInput").value.trim(),
-    aipro_key: $("aiproKeyInput").value.trim(),
     netease_music_u: $("neteaseMusicUInput").value.trim(),
     luckin_mcp_enabled: $("luckinMcpEnabledInput").checked,
     luckin_mcp_token: $("luckinMcpTokenInput").value.trim(),
     luckin_default_longitude: $("luckinLongitudeInput").value.trim(),
     luckin_default_latitude: $("luckinLatitudeInput").value.trim(),
-    luckin_default_shop_keyword: $("luckinShopKeywordInput").value.trim()
+    luckin_default_shop_keyword: $("luckinShopKeywordInput").value.trim(),
+    custom_model_routes: customRoutes
   });
-  showToast("✅ 已保存");
+  customModelRoutes = normalizeRoutesForUi(customRoutes, collapsedState);
+  renderCustomRoutes();
+  showToast("✅ 已保存，模型列表刷新后可选择新模型");
 }
 
 function enablePhoneScreenSupervision() {
-  const bridge = getPhoneScreenBridge();
+  var bridge = getPhoneScreenBridge();
   if (!bridge || !bridge.requestPermission) {
     showToast("需要在 Android App 里开启");
     return;
@@ -143,7 +903,7 @@ function enablePhoneScreenSupervision() {
 }
 
 function disablePhoneScreenSupervision() {
-  const bridge = getPhoneScreenBridge();
+  var bridge = getPhoneScreenBridge();
   if (!bridge || !bridge.stop) {
     showToast("需要在 Android App 里关闭");
     return;
@@ -153,7 +913,7 @@ function disablePhoneScreenSupervision() {
 }
 
 function openPhoneAccessibilitySettings() {
-  const bridge = getPhoneScreenBridge();
+  var bridge = getPhoneScreenBridge();
   if (!bridge || !bridge.openAccessibilitySettings) {
     showToast("需要在 Android App 里开启");
     return;
@@ -162,7 +922,7 @@ function openPhoneAccessibilitySettings() {
 }
 
 function testPhoneAccessibilityCapture() {
-  const bridge = getPhoneScreenBridge();
+  var bridge = getPhoneScreenBridge();
   if (!bridge) {
     showToast("需要在 Android App 里测试");
     return;
@@ -185,18 +945,59 @@ function getPhoneScreenBridge() {
 }
 
 function refreshPhoneScreenStatus() {
-  const el = $("phoneScreenStatus");
+  var el = $("phoneScreenStatus");
   if (!el) return;
-  const bridge = getPhoneScreenBridge();
+  var bridge = getPhoneScreenBridge();
   if (!bridge) {
     el.textContent = "当前不在 Android App 内，手机截图能力不可用。";
     return;
   }
-  let mediaProjection = false;
-  let accessibility = false;
+  var mediaProjection = false;
+  var accessibility = false;
   try { mediaProjection = !!bridge.isEnabled?.(); } catch (e) {}
   try { accessibility = !!bridge.isAccessibilityEnabled?.(); } catch (e) {}
-  el.textContent = `共享屏幕：${mediaProjection ? "已开启" : "未开启"} · 无障碍：${accessibility ? "已开启" : "未开启"}`;
+  el.textContent = "共享屏幕：" + (mediaProjection ? "已开启" : "未开启") + " · 无障碍：" + (accessibility ? "已开启" : "未开启");
+}
+
+function getMediaCacheBridge() {
+  if (window.AppMediaCache) return window.AppMediaCache;
+  try {
+    if (window.parent && window.parent !== window && window.parent.AppMediaCache) {
+      return window.parent.AppMediaCache;
+    }
+  } catch (e) {}
+  return null;
+}
+
+function refreshMediaCacheStatus() {
+  var bridge = getMediaCacheBridge();
+  var section = $("mediaCacheSection");
+  if (!bridge || !bridge.getInfo || !section) return;
+  section.style.display = "block";
+  try {
+    var info = JSON.parse(bridge.getInfo());
+    var usedMb = (Number(info.bytes || 0) / 1024 / 1024).toFixed(1);
+    $("mediaCacheStatus").textContent = "已使用 " + usedMb + " MB，共 " + Number(info.files || 0) + " 个文件";
+    $("mediaCacheLimitInput").value = String(info.limitMb || 1024);
+  } catch (e) {
+    $("mediaCacheStatus").textContent = "暂时无法读取缓存占用";
+  }
+}
+
+function saveMediaCacheLimit() {
+  var bridge = getMediaCacheBridge();
+  if (!bridge || !bridge.setLimitMb) return;
+  bridge.setLimitMb(Number($("mediaCacheLimitInput").value || 1024));
+  showToast("缓存上限已更新");
+  setTimeout(refreshMediaCacheStatus, 300);
+}
+
+function clearMediaCache() {
+  var bridge = getMediaCacheBridge();
+  if (!bridge || !bridge.clear) return;
+  bridge.clear();
+  showToast("正在清理媒体缓存");
+  setTimeout(refreshMediaCacheStatus, 500);
 }
 </script>
 </body>

@@ -30,7 +30,9 @@ async def list_cameras():
     # 跳过当前正在使用的摄像头，避免 DirectShow 设备冲突导致采集线程中断
     skip = cam.cfg["camera_index"] if cam.running else -1
     cams = await asyncio.get_event_loop().run_in_executor(None, lambda: detect_cameras(skip_index=skip))
-    return {"cameras": cams, "current": cam.cfg["camera_index"]}
+    current = cam.cfg["camera_index"]
+    cams = sorted(set(cams))
+    return {"cameras": cams, "current": current}
 
 @router.get("/api/cam/status")
 async def cam_status():

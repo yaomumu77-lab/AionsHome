@@ -11,7 +11,7 @@ import android.widget.TextView;
 import androidx.appcompat.app.AppCompatActivity;
 
 /**
- * 启动页 — 选择连接地址（家庭WiFi / 户外Tailscale）
+ * 启动页 — 选择连接地址（家庭WiFi / Cloudflare / 户外Tailscale）
  */
 public class LauncherActivity extends AppCompatActivity {
 
@@ -19,9 +19,10 @@ public class LauncherActivity extends AppCompatActivity {
     private static final String KEY_URL     = "saved_url";
     private static final String KEY_AUTO    = "auto_connect";
 
-    // ★ 在这里修改你的两个地址
-    private static final String URL_HOME    = "http://192.168.xx.xxx:8080/chat";
-    private static final String URL_OUTDOOR = "http://192.168.xx.xxx:8080/chat";
+    // ★ 在这里修改你的连接地址
+    private static final String URL_HOME       = "http://192.168.xx.xxx:8080/chat";
+    private static final String URL_CLOUDFLARE = ConnectionEndpoint.CLOUDFLARE_PAGE_URL;
+    private static final String URL_OUTDOOR    = "http://192.168.xx.xxx:8080/chat";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -31,25 +32,35 @@ public class LauncherActivity extends AppCompatActivity {
 
         // 如果上次勾选了"记住选择"，直接跳转
         if (prefs.getBoolean(KEY_AUTO, false)) {
-            String savedUrl = prefs.getString(KEY_URL, URL_HOME);
+            String savedUrl = ConnectionEndpoint.normalizePageUrl(
+                    prefs.getString(KEY_URL, URL_HOME));
+            prefs.edit().putString(KEY_URL, savedUrl).apply();
             launchWebView(savedUrl);
             return;
         }
 
         setContentView(R.layout.activity_launcher);
 
-        TextView tvHome    = findViewById(R.id.tvHomeUrl);
-        TextView tvOutdoor = findViewById(R.id.tvOutdoorUrl);
-        Button   btnHome   = findViewById(R.id.btnHome);
-        Button   btnOutdoor= findViewById(R.id.btnOutdoor);
-        CheckBox cbRemember= findViewById(R.id.cbRemember);
+        TextView tvHome       = findViewById(R.id.tvHomeUrl);
+        TextView tvCloudflare = findViewById(R.id.tvCloudflareUrl);
+        TextView tvOutdoor    = findViewById(R.id.tvOutdoorUrl);
+        Button   btnHome      = findViewById(R.id.btnHome);
+        Button   btnCloudflare= findViewById(R.id.btnCloudflare);
+        Button   btnOutdoor   = findViewById(R.id.btnOutdoor);
+        CheckBox cbRemember   = findViewById(R.id.cbRemember);
 
         tvHome.setText(URL_HOME);
+        tvCloudflare.setText(URL_CLOUDFLARE);
         tvOutdoor.setText(URL_OUTDOOR);
 
         btnHome.setOnClickListener(v -> {
             saveIfNeeded(prefs, cbRemember.isChecked(), URL_HOME);
             launchWebView(URL_HOME);
+        });
+
+        btnCloudflare.setOnClickListener(v -> {
+            saveIfNeeded(prefs, cbRemember.isChecked(), URL_CLOUDFLARE);
+            launchWebView(URL_CLOUDFLARE);
         });
 
         btnOutdoor.setOnClickListener(v -> {
@@ -66,6 +77,7 @@ public class LauncherActivity extends AppCompatActivity {
     }
 
     private void launchWebView(String url) {
+        url = ConnectionEndpoint.normalizePageUrl(url);
         // 启动前台推送服务
         startPushService(url);
 

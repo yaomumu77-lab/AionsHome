@@ -16,6 +16,7 @@ from ws import manager
 from wish_pool import (
     create_wish,
     delete_wish,
+    draw_specific_wish,
     draw_wish,
     get_actor_names,
     get_wish,
@@ -171,6 +172,19 @@ async def api_draw_wish(
     drawer: str = Query("", pattern="^(|user|aion|connor)$"),
 ):
     wish = await draw_wish(author=author, drawer=drawer)
+    return {"ok": True, "wish": wish}
+
+
+@router.post("/{wish_id}/draw")
+async def api_draw_specific_wish(wish_id: str):
+    existing = await get_wish(wish_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Wish not found")
+    if existing.get("status") != "active":
+        raise HTTPException(status_code=409, detail="Wish is no longer in the pool")
+    wish = await draw_specific_wish(wish_id)
+    if not wish:
+        raise HTTPException(status_code=409, detail="Wish is no longer in the pool")
     return {"ok": True, "wish": wish}
 
 

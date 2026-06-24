@@ -27,6 +27,7 @@ import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
 
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -46,6 +47,12 @@ public class AionRingBleBridge {
     private static final String PREFS_NAME = "aion_ring_ble";
     private static final String KEY_DEVICE_ADDRESS = "device_address";
     private static final String KEY_DEVICE_NAME = "device_name";
+    private static final String KEY_SYNC_FAIL_COUNT = "bg_sync_fail_count";
+    private static final String KEY_NEXT_SYNC_ATTEMPT_AT = "bg_next_sync_attempt_at";
+    private static final String KEY_LAST_SYNC_FAILURE = "bg_last_sync_failure";
+    private static final String KEY_PAGE_CONNECTED = "page_connection_active";
+    private static final String KEY_PAGE_CONNECTED_AT = "page_connection_active_at";
+    private static final int AUTO_SYNC_OFFSET_MINUTE = 2;
     private static final UUID CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     private static final int[] RING_COMPANY_IDS = {0x7810, 0x7811, 0x7812, 0x7813, 0xFEC5};
 
@@ -81,6 +88,16 @@ public class AionRingBleBridge {
     private volatile boolean connected = false;
     private volatile boolean gattConnected = false;
     private volatile boolean scanning = false;
+    private final Runnable autoSyncRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!connected) return;
+            markPageConnectionActive();
+            callJs("ringNativeBle.onLog('原生定时触发戒指同步')");
+            callJs("syncRingHistory(true)");
+            scheduleNextAutoSync();
+        }
+    };
     private volatile CountDownLatch writeLatch;
     private BluetoothDevice firstCandidate = null;
     private final Map<Integer, BluetoothDevice> candidateDevices = new HashMap<>();
@@ -146,6 +163,9 @@ public class AionRingBleBridge {
                 .edit()
                 .remove(KEY_DEVICE_ADDRESS)
                 .remove(KEY_DEVICE_NAME)
+                .remove(KEY_SYNC_FAIL_COUNT)
+                .remove(KEY_NEXT_SYNC_ATTEMPT_AT)
+                .remove(KEY_LAST_SYNC_FAILURE)
                 .apply();
         callJs("ringNativeBle.onLog('已忘记保存的戒指设备')");
     }
@@ -228,6 +248,14 @@ public class AionRingBleBridge {
 
     @JavascriptInterface
     public void disconnect() {
+        disconnectInternal(true);
+    }
+
+    public void close() {
+        disconnectInternal(false);
+    }
+
+    private void disconnectInternal(boolean notifyJs) {
         stopScan();
         dismissScanDialog();
         connected = false;
@@ -243,7 +271,9 @@ public class AionRingBleBridge {
             } catch (Exception ignored) {}
             gatt = null;
         }
-        callJs("ringNativeBle.onDisconnected()");
+        stopAutoSync();
+        clearPageConnectionActive();
+        if (notifyJs) callJs("ringNativeBle.onDisconnected()");
     }
 
     @JavascriptInterface
@@ -542,6 +572,8 @@ public class AionRingBleBridge {
                 connected = false;
                 gattConnected = false;
                 writeChar = null;
+                stopAutoSync();
+                clearPageConnectionActive();
                 try { g.close(); } catch (Exception ignored) {}
                 // GATT 133 / 62 是 Android 常见临时失败，重试可恢复
                 if ((status == GATT_STATUS_BUSY || status == 62) && gattConnectAttempt < MAX_GATT_RETRY && currentDevice != null) {
@@ -569,6 +601,8 @@ public class AionRingBleBridge {
                 gattConnected = false;
                 writeChar = null;
                 lastStage = "disconnected";
+                stopAutoSync();
+                clearPageConnectionActive();
                 callJs("ringNativeBle.onDisconnected()");
                 try { g.close(); } catch (Exception ignored) {}
             }
@@ -787,8 +821,68 @@ public class AionRingBleBridge {
         gattConnected = true;
         lastStage = "ready";
         autoConnectFailCount = 0;  // 连接成功，重置失败计数
+        clearBackgroundFailureBackoff();
+        markPageConnectionActive();
+        scheduleNextAutoSync();
         callJs("ringNativeBle.onConnected('" + escapeJs(deviceName) + "')");
         callJs("ringNativeBle.onLog('使用 " + matched.name + " 通道')");
+    }
+
+    private void clearBackgroundFailureBackoff() {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .remove(KEY_SYNC_FAIL_COUNT)
+                .remove(KEY_NEXT_SYNC_ATTEMPT_AT)
+                .remove(KEY_LAST_SYNC_FAILURE)
+                .apply();
+    }
+
+    private void markPageConnectionActive() {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_PAGE_CONNECTED, true)
+                .putLong(KEY_PAGE_CONNECTED_AT, System.currentTimeMillis())
+                .apply();
+    }
+
+    private void clearPageConnectionActive() {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .remove(KEY_PAGE_CONNECTED)
+                .remove(KEY_PAGE_CONNECTED_AT)
+                .apply();
+    }
+
+    private void scheduleNextAutoSync() {
+        if (!connected) return;
+        mainHandler.removeCallbacks(autoSyncRunnable);
+        long delay = computeNextAutoSyncDelayMs();
+        mainHandler.postDelayed(autoSyncRunnable, delay);
+    }
+
+    private void stopAutoSync() {
+        mainHandler.removeCallbacks(autoSyncRunnable);
+    }
+
+    private long computeNextAutoSyncDelayMs() {
+        Calendar cal = Calendar.getInstance();
+        int minute = cal.get(Calendar.MINUTE);
+        int second = cal.get(Calendar.SECOND);
+        int millisecond = cal.get(Calendar.MILLISECOND);
+        int targetMinute = (minute / 10) * 10 + AUTO_SYNC_OFFSET_MINUTE;
+        if (minute > targetMinute
+                || (minute == targetMinute && (second > 0 || millisecond > 0))) {
+            targetMinute += 10;
+        }
+        cal.set(Calendar.SECOND, 0);
+        cal.set(Calendar.MILLISECOND, 0);
+        if (targetMinute >= 60) {
+            cal.add(Calendar.HOUR_OF_DAY, 1);
+            targetMinute -= 60;
+        }
+        cal.set(Calendar.MINUTE, targetMinute);
+        long delay = cal.getTimeInMillis() - System.currentTimeMillis();
+        return Math.max(delay, 1000);
     }
 
     @SuppressWarnings("deprecation")

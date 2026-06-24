@@ -219,7 +219,16 @@ def _strip_leading_cli_role_header(text: str) -> str:
     return re.sub(r"^\s*\[(?:Assistant|Model|AI|Aion)\]\s*", "", text, count=1).lstrip()
 
 
-def detect_cameras(max_test: int = 5, skip_index: int = -1) -> list:
+def _is_readable_camera_frame(frame) -> bool:
+    if frame is None or not hasattr(frame, "shape") or frame.size == 0:
+        return False
+    h, w = frame.shape[:2]
+    if h <= 0 or w <= 0:
+        return False
+    return True
+
+
+def detect_cameras(max_test: int = 10, skip_index: int = -1) -> list:
     """扫描可用摄像头（DirectShow 后端 + 实际读帧验证）
     skip_index: 跳过正在使用的摄像头，避免抢占设备导致采集线程中断
     """
@@ -231,9 +240,7 @@ def detect_cameras(max_test: int = 5, skip_index: int = -1) -> list:
         try:
             cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
             if cap.isOpened():
-                ret, frame = cap.read()
-                if ret and frame is not None and frame.mean() > 1:
-                    available.append(i)
+                available.append(i)
                 cap.release()
                 time.sleep(0.3)
             else:
@@ -339,7 +346,7 @@ class CameraMonitor:
                 ret = False
             if ret and frame is not None:
                 avg = frame.mean()
-                if avg > 5:
+                if _is_readable_camera_frame(frame):
                     print(f"[Camera] 验证通过 (avg_pixel={avg:.1f})")
                     with self._lock:
                         self._latest_frame = frame
@@ -597,12 +604,10 @@ class CameraMonitor:
                 ret, frame = self.cap.read()
             except Exception:
                 ret = False
-            # 用中心 32x32 区域采样代替全帧 mean()，大幅减少 CPU 开销
+            # Darkness is a valid camera state; only require that a frame exists.
             valid = False
             if ret and frame is not None:
-                h, w = frame.shape[:2]
-                cy, cx = h // 2, w // 2
-                valid = frame[cy-16:cy+16, cx-16:cx+16].mean() > 5
+                valid = _is_readable_camera_frame(frame)
             if valid:
                 fail_count = 0
                 with self._lock:
@@ -623,10 +628,10 @@ class CameraMonitor:
             # 监控活跃时 ~30fps，空闲时 ~10fps 减少 CPU
             time.sleep(0.033 if self.monitoring else 0.1)
 
-    def _capture_screen(self) -> np.ndarray | None:
-        """截取主屏幕画面，缩放到与摄像头同宽，返回 BGR numpy 数组"""
+    def _capture_screen(self, *, force: bool = False) -> np.ndarray | None:
+        """截取主屏幕画面，缩放到与摄像头同宽，返回 BGR numpy 数组。"""
         try:
-            if not self._should_capture_pc_screen():
+            if not force and not self._should_capture_pc_screen():
                 return None
             from PIL import ImageGrab
             img = ImageGrab.grab()  # 仅主屏幕
@@ -664,10 +669,10 @@ class CameraMonitor:
         )
         return out
 
-    def _combine_with_screen(self, cam_frame: np.ndarray) -> np.ndarray:
+    def _combine_with_screen(self, cam_frame: np.ndarray, *, force_pc_screen: bool = False) -> np.ndarray:
         """将摄像头画面（上）和主屏幕截图（下）上下拼接"""
         cam_layer = self._add_layer_label(cam_frame, "CAMERA VIEW - body/location source")
-        screen = self._capture_screen()
+        screen = self._capture_screen(force=force_pc_screen)
         if screen is None:
             phone_layer = self._build_phone_only_layer(cam_frame.shape[1])
             if phone_layer is not None:
@@ -783,18 +788,18 @@ class CameraMonitor:
             print(f"[Camera] 手机单独图层构建失败: {e}")
             return None
 
-    def get_frame_jpeg(self) -> bytes | None:
+    def get_frame_jpeg(self, *, force_pc_screen: bool = False) -> bytes | None:
         with self._lock:
             if self._latest_frame is None:
                 return None
             frame = self._apply_crop(self._latest_frame)
-        combined = self._combine_with_screen(frame)
+        combined = self._combine_with_screen(frame, force_pc_screen=force_pc_screen)
         _, buf = cv2.imencode(".jpg", combined)
         return buf.tobytes()
 
-    def get_screen_only_jpeg(self) -> bytes | None:
+    def get_screen_only_jpeg(self, *, force_pc_screen: bool = False) -> bytes | None:
         """摄像头未开启时，仅截取 PC 屏幕 + 手机截屏，返回 JPEG bytes。"""
-        screen = self._capture_screen()
+        screen = self._capture_screen(force=force_pc_screen)
         if screen is not None:
             screen = self._overlay_phone_screen(screen)
             _, buf = cv2.imencode(".jpg", screen)
@@ -1188,10 +1193,10 @@ class CameraMonitor:
 
         prefix = []
         if wb.get("ai_persona"):
-            prefix.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
+            prefix.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
             prefix.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
         if wb.get("user_persona"):
-            prefix.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
+            prefix.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
             prefix.append({"role": "assistant", "content": "收到，我会记住你的信息。"})
 
         core_parts = [f"【{user_name}】已经{time_ago}没有和你说话了。"]
@@ -1347,7 +1352,11 @@ CAM_CHECK_CMD = "[CAM_CHECK]"
 
 async def perform_cam_check(conv_id: str, model_key: str):
     """Core 在聊天中主动请求查看监控画面：截图 → 发给 Core → 保存为新消息"""
-    jpg_bytes = cam.get_frame_jpeg() or cam.get_screen_only_jpeg()
+    jpg_bytes = cam.get_frame_jpeg(force_pc_screen=True)
+    frame_source = "camera"
+    if not jpg_bytes:
+        jpg_bytes = cam.get_screen_only_jpeg(force_pc_screen=True)
+        frame_source = "device"
     if not jpg_bytes:
         return
 
@@ -1362,15 +1371,16 @@ async def perform_cam_check(conv_id: str, model_key: str):
     (SCREENSHOTS_DIR / fname).write_bytes(jpg_bytes)
 
     wb = load_worldbook()
-    user_name = wb.get("user_name", "用户")
+    user_name = wb.get("user_name") or "用户"
+    ai_name = wb.get("ai_name") or "AI"
 
     # 构建人设前缀
     prefix = []
     if wb.get("ai_persona"):
-        prefix.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
+        prefix.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
         prefix.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
     if wb.get("user_persona"):
-        prefix.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
+        prefix.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
         prefix.append({"role": "assistant", "content": "收到，我会记住你的信息。"})
 
     # 获取最近对话上下文（统一时间线：合并私聊 + 群聊消息）
@@ -1379,10 +1389,13 @@ async def perform_cam_check(conv_id: str, model_key: str):
     recent = render_merged_timeline(merged, "aion")
 
     cam_prompt = (
-        f"你刚才想看看{user_name}在干什么，这是系统从监控摄像头抓取的实时画面。"
+        f"你刚才想看看{user_name}在干什么，这是系统抓取的实时监控画面。"
+        f"画面可能包含摄像头、电脑屏幕和手机屏幕；如果没有摄像头画面，就只根据电脑/手机屏幕内容说明设备使用情况，不要推断身体位置。"
         f"请根据画面内容，自然地描述你看到的情况并和{user_name}互动。"
         f"不需要再说\"让我看看\"之类的话，直接说你看到了什么。"
     )
+    if frame_source == "device":
+        cam_prompt += "本次没有可用摄像头画面，系统改用电脑屏幕和/或手机屏幕截图。"
     try:
         from health_context import build_heart_rate_prompt_block
         cam_prompt += await build_heart_rate_prompt_block(user_name)
@@ -1416,9 +1429,6 @@ async def perform_cam_check(conv_id: str, model_key: str):
 
     if not full_text.strip():
         return
-
-    wb = load_worldbook()
-    ai_name = wb.get("ai_name", "AI")
 
     # 插入系统提示：查看了监控画面
     sys_now = time.time()

@@ -11,15 +11,26 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from config import SETTINGS, MODELS, save_settings, get_key, get_sentinel_config, load_worldbook, save_worldbook, load_chat_status, TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES, THEATER_TTS_CACHE_DIR
+from config import SETTINGS, MODELS, save_settings, get_key, get_sentinel_config, load_worldbook, save_worldbook, load_chat_status, TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES, THEATER_TTS_CACHE_DIR, normalize_custom_model_routes, refresh_custom_models
 from tts import cleanup_tts_cache_dir
 
 router = APIRouter()
 
+RELAY_MODEL_PROVIDERS = {"aipro", "custom_openai"}
+
 # ── 模型列表 ──────────────────────────────────────
 @router.get("/api/models")
 async def list_models():
-    return [{"key": k, "provider": v["provider"]} for k, v in MODELS.items()]
+    rows = [
+        {
+            "key": k,
+            "provider": v["provider"],
+            "custom": v.get("provider") == "custom_openai",
+            "route_name": v.get("route_name", ""),
+        }
+        for k, v in MODELS.items()
+    ]
+    return sorted(rows, key=lambda item: 1 if item["provider"] in RELAY_MODEL_PROVIDERS else 0)
 
 # ── 设置 ──────────────────────────────────────────
 class SettingsUpdate(BaseModel):
@@ -39,6 +50,38 @@ class SettingsUpdate(BaseModel):
     luckin_default_longitude: Optional[str] = None
     luckin_default_latitude: Optional[str] = None
     luckin_default_shop_keyword: Optional[str] = None
+    custom_model_routes: Optional[list[Dict[str, Any]]] = None
+
+class HomeLayoutUpdate(BaseModel):
+    version: Optional[int] = 2
+    positions: Dict[str, Any] = Field(default_factory=dict)
+
+def _normalize_home_layout(payload: Any) -> Dict[str, Any]:
+    positions = payload.get("positions", {}) if isinstance(payload, dict) else {}
+    normalized: Dict[str, int] = {}
+    if isinstance(positions, dict):
+        for app_id, cell in positions.items():
+            if not isinstance(app_id, str):
+                continue
+            try:
+                cell_index = int(cell)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= cell_index <= 4095:
+                normalized[app_id] = cell_index
+    return {"version": 2, "positions": normalized}
+
+@router.get("/api/home/layout")
+async def get_home_layout():
+    return _normalize_home_layout(SETTINGS.get("home_layout", {}))
+
+@router.put("/api/home/layout")
+async def update_home_layout(body: HomeLayoutUpdate):
+    payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
+    layout = _normalize_home_layout(payload)
+    SETTINGS["home_layout"] = layout
+    save_settings(SETTINGS)
+    return {"ok": True, "layout": layout}
 
 @router.get("/api/settings")
 async def get_settings():
@@ -63,6 +106,7 @@ async def get_settings():
         "luckin_default_longitude": SETTINGS.get("luckin_default_longitude", ""),
         "luckin_default_latitude": SETTINGS.get("luckin_default_latitude", ""),
         "luckin_default_shop_keyword": SETTINGS.get("luckin_default_shop_keyword", ""),
+        "custom_model_routes": normalize_custom_model_routes(SETTINGS.get("custom_model_routes")),
         "gemini_key_masked": mask(SETTINGS.get("gemini_key", "")),
         "siliconflow_key_masked": mask(SETTINGS.get("siliconflow_key", "")),
         "gemini_free_key_masked": mask(SETTINGS.get("gemini_free_key", "")),
@@ -107,6 +151,9 @@ async def update_settings(body: SettingsUpdate):
         SETTINGS["luckin_default_latitude"] = body.luckin_default_latitude
     if body.luckin_default_shop_keyword is not None:
         SETTINGS["luckin_default_shop_keyword"] = body.luckin_default_shop_keyword
+    if body.custom_model_routes is not None:
+        SETTINGS["custom_model_routes"] = normalize_custom_model_routes(body.custom_model_routes)
+        refresh_custom_models()
     if body.netease_music_u is not None:
         old_mu = SETTINGS.get("netease_music_u", "")
         SETTINGS["netease_music_u"] = body.netease_music_u

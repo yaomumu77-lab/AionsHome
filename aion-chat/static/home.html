@@ -68,31 +68,104 @@ body[data-theme="dark"] .clock-widget {
 }
 
 /* ── 应用图标区 ── */
-.app-grid {
+.app-pages {
   flex: 1;
+  min-height: 0;
+  overflow: hidden;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 14px 0;
-  padding: 16px 16px 12px;
-  align-content: end;
-  overflow-y: auto;
   position: relative;
   z-index: 1;
+  touch-action: pan-y;
 }
-.app-grid::-webkit-scrollbar { display: none; }
+.app-pages-track {
+  height: 100%;
+  display: flex;
+  transition: transform 0.24s cubic-bezier(.2,.8,.2,1);
+  will-change: transform;
+}
+.app-page {
+  flex: 0 0 100%;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: repeat(var(--home-page-rows, 3), 82px);
+  gap: 14px 0;
+  padding: 16px 16px 8px;
+  align-content: end;
+}
+.app-slot {
+  min-width: 0;
+  height: 82px;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  position: relative;
+}
+.app-slot.empty {
+  pointer-events: auto;
+}
+.app-slot .app-icon,
+.app-slot .app-placeholder {
+  width: 100%;
+}
+.page-dots {
+  flex-shrink: 0;
+  min-height: 18px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 7px;
+  position: relative;
+  z-index: 1;
+  padding: 0 0 2px;
+}
+.page-dots:empty { display: none; }
+.page-dot {
+  width: 7px;
+  height: 7px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(58,46,34,0.32);
+  box-shadow: 0 1px 3px rgba(255,255,255,0.35);
+  padding: 0;
+  cursor: pointer;
+  transition: width 0.18s, background 0.18s, opacity 0.18s;
+}
+.page-dot.active {
+  width: 18px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.78);
+}
+body[data-theme="dark"] .page-dot {
+  background: rgba(244,246,255,0.30);
+  box-shadow: 0 1px 6px rgba(0,0,0,0.35);
+}
+body[data-theme="dark"] .page-dot.active {
+  background: rgba(244,246,255,0.86);
+}
 
 .app-icon {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: flex-start;
   gap: 6px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  min-width: 0;
+  height: 82px;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
   user-select: none;
   text-decoration: none;
+  touch-action: none;
+  position: relative;
 }
 .app-icon:active .icon-img {
   transform: scale(0.9);
+}
+.app-pages.dragging .app-icon:active .icon-img {
+  transform: none;
 }
 .app-icon .icon-img {
   width: 60px;
@@ -131,6 +204,47 @@ body[data-theme="dark"] .app-icon .icon-label {
 }
 .app-icon.disabled:active .icon-img {
   transform: none;
+}
+.app-placeholder {
+  height: 82px;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 0;
+  pointer-events: none;
+}
+.app-placeholder::before {
+  content: "";
+  width: 60px;
+  height: 60px;
+  border-radius: 16px;
+  border: 1px dashed rgba(58,46,34,0.38);
+  background: rgba(255,255,255,0.22);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.18);
+}
+body[data-theme="dark"] .app-placeholder::before {
+  border-color: rgba(244,246,255,0.36);
+  background: rgba(244,246,255,0.10);
+}
+.drag-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 60;
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(1.06);
+  filter: drop-shadow(0 12px 18px rgba(0,0,0,0.22));
+}
+.drag-ghost .icon-label {
+  color: #3a2e22;
+  text-shadow: 0 1px 5px rgba(255,255,255,0.80);
+}
+body[data-theme="dark"] .drag-ghost .icon-label {
+  color: #f4f6ff;
+  text-shadow: 0 2px 9px rgba(0,0,0,0.72);
+}
+.drag-ghost .icon-img {
+  transform: none !important;
 }
 
 /* ── 底部 Dock 栏 ── */
@@ -393,7 +507,10 @@ body[data-theme="dark"] .gsi-title { color: rgba(244,246,255,0.70); }
     <!-- 应用网格 -->
     <button class="global-search-trigger" onclick="openGlobalSearch()">搜索聊天记录</button>
 
-    <div class="app-grid" id="appGrid"></div>
+    <div class="app-pages" id="appPages" aria-label="应用分页">
+      <div class="app-pages-track" id="appPagesTrack"></div>
+    </div>
+    <div class="page-dots" id="pageDots" aria-label="应用分页指示"></div>
 
     <!-- 底部 Dock -->
     <div class="dock" id="dock"></div>
@@ -422,10 +539,11 @@ const APPS = [
   { id: 'chatroom', name: '聊天室', icon: '/public/funIcon_0020_聊天室.png', url: '/chatroom' ,  dock: true  },
   { id: 'memory',   name: '记忆库',   icon: '/public/funIcon_0006_日记本.png',  url: '/memory' ,  dock: true },
   { id: 'moments',  name: '朋友圈',   icon: '/public/funIcon_0010_朋友圈.png',  url: '/moments' ,  dock: true },
+  { id: 'xhs-lite', name: '小红书',   icon: '/public/funIcon_0024_小红书.png',  url: '/xhs-lite' },
   { id: 'wishes',   name: '许愿池',   icon: '/public/funIcon_0023_许愿池.png',  url: '/wishes' },
   { id: 'worldbook',name: '世界书',   icon: '/public/funIcon_0007_世界书.png',  url: '/worldbook' },
   { id: 'theater',  name: '小剧场',   icon: '/public/funIcon_0009_小剧场.png',  url: '/theater' },
-  <!--   { id: 'whisper',  name: '密语时刻', icon: '/public/funIcon_0011_密语时刻.png', url: '/chat?whisper=1' },-->
+  { id: 'whisper',  name: '密语时刻', icon: '/public/funIcon_0011_密语时刻.png', url: '/chat?whisper=1' },
   { id: 'alarm',    name: '闹钟',     icon: '/public/funIcon_0012_闹钟.png',    url: '/schedule' },
   { id: 'settings', name: '设置',     icon: '/public/funIcon_0008_设置.png',    url: '/settings' },
   { id: 'camera',   name: '监控摄像头', icon: '/public/funIcon_0014_监控.png', url: '/camera' },
@@ -436,7 +554,7 @@ const APPS = [
   { id: 'reading',  name: '陪伴阅读',     icon: '/public/funIcon_0016_陪伴阅读.png',   url: '/reading' },
   { id: 'ghost-forest', name: '奥罗斯幽林', icon: '/public/funIcon_0017_奥罗斯幽林.png', url: '/ghost-forest' },
   { id: 'gift', name: '爱的印记', icon: '/public/funIcon_0018_爱的印记.png', url: '/gift' },
-   <!--    { id: 'fund', name: '奥罗斯财团', icon: '/public/funIcon_0019_奥罗斯财团.png', url: '/fund' },-->
+  { id: 'fund', name: '奥罗斯财团', icon: '/public/funIcon_0019_奥罗斯财团.png', url: '/fund' },
   { id: 'playground', name: '娱乐室', icon: '/public/funIcon_0019_娱乐室.png', url: '/playground' },
   { id: 'doudizhu', name: '斗地主', icon: '/public/funIcon_0021_斗地主.png', url: '/doudizhu' },
   { id: 'seeky', name: 'Seeky', icon: '/public/funIcon_0022_Seeky.png', url: '/seeky' },
@@ -466,27 +584,575 @@ window.addEventListener('storage', e => {
 });
 
 /* ── 渲染 ─────────────────────────────────────── */
-function renderApps() {
-  const grid = document.getElementById('appGrid');
-  const dock = document.getElementById('dock');
+const HOME_GRID_ORDER_KEY = 'aion_home_grid_order_v1';
+const HOME_LAYOUT_KEY = 'aion_home_layout_v2';
+const HOME_LAYOUT_SYNC_URL = '/api/home/layout';
+const PAGE_COLUMNS = 4;
+const PAGE_ROW_HEIGHT = 82;
+const PAGE_ROW_GAP = 14;
+const MIN_FREE_PAGES = 3;
+let appLayout = {};
+let pageCapacity = 12;
+let pageCount = 1;
+let currentPage = 0;
+let localLayoutFromStorage = false;
+let layoutSaveTimer = null;
+let layoutRevision = 0;
+let lastLayoutSyncAt = 0;
+const gestureState = {
+  pointerId: null,
+  startX: 0,
+  startY: 0,
+  swiping: false,
+};
+const dragState = {
+  active: false,
+  appId: null,
+  pointerId: null,
+  sourceCell: null,
+  dropCell: null,
+  startX: 0,
+  startY: 0,
+  lastX: 0,
+  lastY: 0,
+  originalLayout: null,
+  timer: null,
+  ghost: null,
+  edgeTarget: null,
+  edgeTimer: null,
+};
+let suppressClicksUntil = 0;
 
-  const gridApps = APPS.filter(a => !a.dock);
-  const dockApps = APPS.filter(a => a.dock);
-
-  grid.innerHTML = gridApps.map(app => appHTML(app)).join('');
-  dock.innerHTML = dockApps.map(app => appHTML(app)).join('');
+function escapeAttr(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
-function appHTML(app) {
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getGridApps() {
+  return APPS.filter(app => !app.dock);
+}
+
+function getGridAppIds() {
+  return getGridApps().map(app => app.id);
+}
+
+function getAppById(id) {
+  return APPS.find(app => app.id === id);
+}
+
+function getRowsPerPage() {
+  const pages = document.getElementById('appPages');
+  const height = pages?.clientHeight || 330;
+  const verticalPadding = 24;
+  const rows = Math.floor((height - verticalPadding + PAGE_ROW_GAP) / (PAGE_ROW_HEIGHT + PAGE_ROW_GAP));
+  return Math.max(2, Math.min(4, rows || 3));
+}
+
+function buildSequentialLayout(ids) {
+  const layout = {};
+  ids.forEach((id, index) => { layout[id] = index; });
+  return layout;
+}
+
+function extractLayoutPositions(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.version !== 2 || !payload.positions || typeof payload.positions !== 'object') return null;
+  return payload.positions;
+}
+
+function hasLayoutPositions(positions) {
+  if (!positions || typeof positions !== 'object') return false;
+  return getGridAppIds().some(id => Number.isInteger(Number(positions[id])) && Number(positions[id]) >= 0);
+}
+
+function sameLayout(a, b) {
+  return getGridAppIds().every(id => Number(a?.[id]) === Number(b?.[id]));
+}
+
+function nextFreeCell(layout, startAt = 0) {
+  const used = new Set(Object.values(layout).filter(Number.isInteger));
+  let cell = Math.max(0, startAt);
+  while (used.has(cell)) cell += 1;
+  return cell;
+}
+
+function normalizeLayout(rawLayout) {
+  const appIds = getGridAppIds();
+  const allowed = new Set(appIds);
+  const layout = {};
+  const used = new Set();
+  let highest = -1;
+
+  appIds.forEach(id => {
+    const cell = Number(rawLayout?.[id]);
+    if (Number.isInteger(cell) && cell >= 0 && !used.has(cell)) {
+      layout[id] = cell;
+      used.add(cell);
+      highest = Math.max(highest, cell);
+    }
+  });
+
+  appIds.forEach(id => {
+    if (id in layout || !allowed.has(id)) return;
+    const cell = nextFreeCell(layout, highest + 1);
+    layout[id] = cell;
+    used.add(cell);
+    highest = Math.max(highest, cell);
+  });
+
+  return layout;
+}
+
+function loadLayout() {
+  let rawLayout = null;
+  localLayoutFromStorage = false;
+  try {
+    const saved = JSON.parse(localStorage.getItem(HOME_LAYOUT_KEY) || 'null');
+    if (saved && saved.version === 2 && saved.positions && typeof saved.positions === 'object') {
+      rawLayout = saved.positions;
+      localLayoutFromStorage = true;
+    }
+  } catch(e) {}
+
+  if (!rawLayout) {
+    try {
+      const savedOrder = JSON.parse(localStorage.getItem(HOME_GRID_ORDER_KEY) || 'null');
+      if (Array.isArray(savedOrder)) {
+        rawLayout = buildSequentialLayout(savedOrder);
+        localLayoutFromStorage = true;
+      }
+    } catch(e) {}
+  }
+
+  appLayout = normalizeLayout(rawLayout || buildSequentialLayout(getGridAppIds()));
+}
+
+function saveLayoutLocal() {
+  localStorage.setItem(HOME_LAYOUT_KEY, JSON.stringify({
+    version: 2,
+    positions: appLayout,
+  }));
+  localLayoutFromStorage = true;
+}
+
+async function saveLayoutServer(snapshot) {
+  try {
+    await fetch(HOME_LAYOUT_SYNC_URL, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: 2, positions: snapshot }),
+    });
+  } catch(e) {}
+}
+
+function scheduleLayoutServerSave() {
+  const snapshot = { ...appLayout };
+  clearTimeout(layoutSaveTimer);
+  layoutSaveTimer = setTimeout(() => saveLayoutServer(snapshot), 220);
+}
+
+function saveLayout() {
+  saveLayoutLocal();
+  scheduleLayoutServerSave();
+}
+
+async function syncLayoutFromServer(options = {}) {
+  const revisionAtStart = layoutRevision;
+  try {
+    const res = await fetch(HOME_LAYOUT_SYNC_URL, { cache: 'no-store' });
+    if (!res.ok) return;
+    const payload = await res.json();
+    const serverPositions = extractLayoutPositions(payload);
+    if (!hasLayoutPositions(serverPositions)) {
+      if (localLayoutFromStorage) scheduleLayoutServerSave();
+      return;
+    }
+    if (!options.force && (layoutRevision !== revisionAtStart || dragState.active)) return;
+    const nextLayout = normalizeLayout(serverPositions);
+    if (!sameLayout(appLayout, nextLayout)) {
+      appLayout = nextLayout;
+      saveLayoutLocal();
+      renderApps();
+    }
+  } catch(e) {}
+}
+
+function requestLayoutSync() {
+  const now = Date.now();
+  if (now - lastLayoutSyncAt < 1500) return;
+  lastLayoutSyncAt = now;
+  syncLayoutFromServer();
+}
+
+function getHighestUsedCell(layout = appLayout) {
+  const values = Object.values(layout).filter(Number.isInteger);
+  if (dragState.active && Number.isInteger(dragState.dropCell)) values.push(dragState.dropCell);
+  return values.length ? Math.max(...values) : -1;
+}
+
+function getPageCountForLayout() {
+  const highest = getHighestUsedCell();
+  const usedPages = highest >= 0 ? Math.floor(highest / pageCapacity) + 1 : 1;
+  return Math.max(MIN_FREE_PAGES, usedPages + 1);
+}
+
+function makeCellMap() {
+  const map = new Map();
+  getGridApps().forEach(app => {
+    const cell = appLayout[app.id];
+    if (Number.isInteger(cell) && cell >= 0) {
+      map.set(cell, { type: 'app', app });
+    }
+  });
+
+  if (!dragState.active || !dragState.appId) return map;
+
+  const sourceCell = Number.isInteger(dragState.sourceCell) ? dragState.sourceCell : appLayout[dragState.appId];
+  const dropCell = Number.isInteger(dragState.dropCell) ? dragState.dropCell : sourceCell;
+  const occupant = map.get(dropCell);
+  map.delete(sourceCell);
+  if (occupant && occupant.app.id !== dragState.appId) {
+    map.delete(dropCell);
+    if (Number.isInteger(sourceCell)) map.set(sourceCell, occupant);
+  }
+  map.set(dropCell, { type: 'placeholder', appId: dragState.appId });
+  return map;
+}
+
+function renderApps() {
+  const track = document.getElementById('appPagesTrack');
+  const dots = document.getElementById('pageDots');
+  const dock = document.getElementById('dock');
+
+  const rows = getRowsPerPage();
+  document.documentElement.style.setProperty('--home-page-rows', rows);
+  pageCapacity = PAGE_COLUMNS * rows;
+  pageCount = getPageCountForLayout();
+  currentPage = Math.min(currentPage, pageCount - 1);
+  const cellMap = makeCellMap();
+  const dockApps = APPS.filter(app => app.dock);
+
+  track.innerHTML = Array.from({ length: pageCount }, (_, pageIndex) => `
+    <div class="app-page" data-page-index="${pageIndex}">
+      ${Array.from({ length: pageCapacity }, (_, slot) => appCellHTML(cellMap.get(pageIndex * pageCapacity + slot), pageIndex * pageCapacity + slot)).join('')}
+    </div>
+  `).join('');
+  dots.innerHTML = pageCount > 1
+    ? Array.from({ length: pageCount }, (_, idx) => `<button class="page-dot ${idx === currentPage ? 'active' : ''}" type="button" data-page="${idx}" aria-label="第 ${idx + 1} 页"></button>`).join('')
+    : '';
+  dock.innerHTML = dockApps.map(app => appHTML(app, { grid: false })).join('');
+  updatePager(false);
+}
+
+function appCellHTML(cell, cellIndex) {
+  const content = !cell
+    ? ''
+    : cell.type === 'placeholder'
+      ? '<div class="app-placeholder" aria-hidden="true"></div>'
+      : appHTML(cell.app, { grid: true, cell: cellIndex });
+  return `<div class="app-slot ${cell ? '' : 'empty'}" data-cell="${cellIndex}">${content}</div>`;
+}
+
+function appHTML(app, options = {}) {
   const disabled = !app.url;
   const badgeId = app.id === 'moments' ? 'id="momentsBadge"' : '';
   return `
-    <a class="app-icon ${disabled ? 'disabled' : ''}"
-       ${app.url ? `onclick="openApp('${app.url}')"` : `onclick="showToast('${app.name} — 还在做哦！😏')"`}
-       role="button" tabindex="0">
+    <button class="app-icon ${disabled ? 'disabled' : ''}"
+       type="button"
+       data-app-id="${escapeAttr(app.id)}"
+       data-url="${escapeAttr(app.url || '')}"
+       data-grid-app="${options.grid ? '1' : '0'}"
+       ${options.grid ? `data-cell="${options.cell}"` : ''}
+       aria-label="${escapeAttr(app.name)}">
       <div class="icon-img"><img src="${app.icon}" alt="${app.name}" draggable="false"><div class="badge-dot" ${badgeId}></div></div>
       <span class="icon-label">${app.name}</span>
-    </a>`;
+    </button>`;
+}
+
+function updatePager(animate = true, offsetPx = 0) {
+  const pages = document.getElementById('appPages');
+  const track = document.getElementById('appPagesTrack');
+  const dots = document.getElementById('pageDots');
+  const pageWidth = pages?.clientWidth || window.innerWidth;
+  track.style.transition = animate ? 'transform 0.24s cubic-bezier(.2,.8,.2,1)' : 'none';
+  track.style.transform = `translate3d(${(-currentPage * pageWidth) + offsetPx}px, 0, 0)`;
+  dots.querySelectorAll('.page-dot').forEach(dot => {
+    dot.classList.toggle('active', Number(dot.dataset.page) === currentPage);
+  });
+}
+
+function setCurrentPage(page, animate = true) {
+  currentPage = Math.max(0, Math.min(page, pageCount - 1));
+  updatePager(animate);
+}
+
+function clearLongPressTimer() {
+  clearTimeout(dragState.timer);
+  dragState.timer = null;
+}
+
+function clearEdgeTurnTimer() {
+  clearTimeout(dragState.edgeTimer);
+  dragState.edgeTimer = null;
+  dragState.edgeTarget = null;
+}
+
+function handleAppClick(e) {
+  const icon = e.target.closest('.app-icon');
+  if (!icon || Date.now() < suppressClicksUntil) {
+    e.preventDefault();
+    return;
+  }
+  e.preventDefault();
+  const app = getAppById(icon.dataset.appId);
+  if (!app) return;
+  if (app.url) {
+    openApp(app.url);
+  } else {
+    showToast(`${app.name} — 还在做哦！😏`);
+  }
+}
+
+function handleAppKeydown(e) {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const icon = e.target.closest('.app-icon');
+  if (!icon) return;
+  e.preventDefault();
+  icon.click();
+}
+
+function handlePagesPointerDown(e) {
+  if (e.button != null && e.button !== 0) return;
+  const pages = document.getElementById('appPages');
+  const icon = e.target.closest('.app-icon[data-grid-app="1"]');
+  gestureState.pointerId = e.pointerId;
+  gestureState.startX = e.clientX;
+  gestureState.startY = e.clientY;
+  gestureState.swiping = false;
+
+  if (!icon) {
+    dragState.appId = null;
+    clearLongPressTimer();
+    return;
+  }
+  dragState.pointerId = e.pointerId;
+  dragState.appId = icon.dataset.appId;
+  dragState.sourceCell = appLayout[dragState.appId];
+  dragState.dropCell = dragState.sourceCell;
+  dragState.startX = e.clientX;
+  dragState.startY = e.clientY;
+  dragState.lastX = e.clientX;
+  dragState.lastY = e.clientY;
+  clearLongPressTimer();
+  dragState.timer = setTimeout(() => {
+    startIconDrag(icon, dragState.lastX, dragState.lastY, e.pointerId);
+  }, 430);
+}
+
+function handlePagesPointerMove(e) {
+  if (gestureState.pointerId !== e.pointerId) return;
+  const dx = e.clientX - gestureState.startX;
+  const dy = e.clientY - gestureState.startY;
+
+  if (dragState.active) {
+    e.preventDefault();
+    updateIconDrag(e.clientX, e.clientY);
+    return;
+  }
+
+  if (dragState.timer) {
+    dragState.lastX = e.clientX;
+    dragState.lastY = e.clientY;
+  }
+  if (dragState.timer && Math.hypot(dx, dy) > 16) clearLongPressTimer();
+  if (Math.abs(dx) < 10 || Math.abs(dx) <= Math.abs(dy) * 1.15) return;
+
+  if (!gestureState.swiping) {
+    try { document.getElementById('appPages').setPointerCapture(e.pointerId); } catch(_) {}
+  }
+  gestureState.swiping = true;
+  const blockedEdge = (currentPage === 0 && dx > 0) || (currentPage === pageCount - 1 && dx < 0);
+  updatePager(false, blockedEdge ? dx * 0.28 : dx);
+  e.preventDefault();
+}
+
+function handlePagesPointerUp(e) {
+  if (gestureState.pointerId !== e.pointerId && !dragState.active) return;
+  const pages = document.getElementById('appPages');
+  clearLongPressTimer();
+
+  if (dragState.active) {
+    endIconDrag(true);
+    resetGesture(e.pointerId, pages);
+    e.preventDefault();
+    return;
+  }
+
+  if (gestureState.swiping) {
+    const dx = e.clientX - gestureState.startX;
+    const pageWidth = pages.clientWidth || window.innerWidth;
+    const threshold = Math.min(96, pageWidth * 0.22);
+    if (Math.abs(dx) > threshold) setCurrentPage(currentPage + (dx < 0 ? 1 : -1));
+    else updatePager(true);
+    suppressClicksUntil = Date.now() + 320;
+    e.preventDefault();
+  }
+  resetGesture(e.pointerId, pages);
+}
+
+function resetGesture(pointerId, pages) {
+  gestureState.pointerId = null;
+  gestureState.swiping = false;
+  try { pages?.releasePointerCapture(pointerId); } catch(_) {}
+}
+
+function startIconDrag(icon, x, y, pointerId) {
+  if (dragState.pointerId !== pointerId || !dragState.appId) return;
+  const rect = icon.getBoundingClientRect();
+  const ghost = icon.cloneNode(true);
+  ghost.classList.add('drag-ghost');
+  ghost.style.width = `${rect.width}px`;
+  ghost.style.height = `${rect.height}px`;
+  document.body.appendChild(ghost);
+
+  dragState.active = true;
+  dragState.ghost = ghost;
+  dragState.originalLayout = { ...appLayout };
+  dragState.sourceCell = appLayout[dragState.appId];
+  dragState.dropCell = dragState.sourceCell;
+  dragState.lastX = x;
+  dragState.lastY = y;
+  suppressClicksUntil = Date.now() + 500;
+  try { document.getElementById('appPages').setPointerCapture(pointerId); } catch(_) {}
+  document.getElementById('appPages').classList.add('dragging');
+  renderApps();
+  updateDragGhost(x, y);
+  showToast('拖到任意空格，松手保存');
+}
+
+function updateDragGhost(x, y) {
+  if (!dragState.ghost) return;
+  dragState.ghost.style.left = `${x}px`;
+  dragState.ghost.style.top = `${y}px`;
+}
+
+function updateIconDrag(x, y) {
+  dragState.lastX = x;
+  dragState.lastY = y;
+  updateDragGhost(x, y);
+  setDragDropCell(cellFromPoint(x, y));
+  scheduleDragPageTurn(x);
+}
+
+function setDragDropCell(cell) {
+  if (!dragState.active || !Number.isInteger(cell) || cell < 0) return false;
+  if (cell === dragState.dropCell) return false;
+  dragState.dropCell = cell;
+  renderApps();
+  updateDragGhost(dragState.lastX, dragState.lastY);
+  return true;
+}
+
+function cellFromPoint(x, y) {
+  const el = document.elementFromPoint(x, y);
+  const slot = el?.closest('.app-slot');
+  if (slot) return Number(slot.dataset.cell);
+  const page = el?.closest('.app-page') || document.querySelector(`.app-page[data-page-index="${currentPage}"]`);
+  return page ? cellFromPagePoint(page, x, y) : dragState.dropCell;
+}
+
+function cellFromPagePoint(pageEl, x, y) {
+  const pageIndex = Number(pageEl.dataset.pageIndex || 0);
+  const rect = pageEl.getBoundingClientRect();
+  const style = getComputedStyle(pageEl);
+  const paddingLeft = parseFloat(style.paddingLeft) || 0;
+  const paddingRight = parseFloat(style.paddingRight) || 0;
+  const paddingBottom = parseFloat(style.paddingBottom) || 0;
+  const rows = getRowsPerPage();
+  const colWidth = (rect.width - paddingLeft - paddingRight) / PAGE_COLUMNS;
+  const contentHeight = rows * PAGE_ROW_HEIGHT + Math.max(0, rows - 1) * PAGE_ROW_GAP;
+  const startX = rect.left + paddingLeft;
+  const startY = rect.bottom - paddingBottom - contentHeight;
+  const relativeX = clampNumber(x - startX, 0, colWidth * PAGE_COLUMNS - 1);
+  const relativeY = clampNumber(y - startY, 0, contentHeight - 1);
+  const col = clampNumber(Math.floor(relativeX / colWidth), 0, PAGE_COLUMNS - 1);
+  const row = clampNumber(Math.floor(relativeY / (PAGE_ROW_HEIGHT + PAGE_ROW_GAP)), 0, rows - 1);
+  return pageIndex * pageCapacity + row * PAGE_COLUMNS + col;
+}
+
+function getAppIdAtCell(layout, cell, exceptId = null) {
+  return Object.keys(layout).find(id => id !== exceptId && layout[id] === cell) || null;
+}
+
+function scheduleDragPageTurn(x) {
+  if (pageCount < 2) return;
+  const margin = 46;
+  const width = window.innerWidth || document.documentElement.clientWidth;
+  let target = null;
+  if (x < margin && currentPage > 0) target = currentPage - 1;
+  if (x > width - margin && currentPage < pageCount - 1) target = currentPage + 1;
+  if (target == null) {
+    clearEdgeTurnTimer();
+    return;
+  }
+  if (dragState.edgeTarget === target) return;
+  clearEdgeTurnTimer();
+  dragState.edgeTarget = target;
+  dragState.edgeTimer = setTimeout(() => {
+    setCurrentPage(target);
+    const page = document.querySelector(`.app-page[data-page-index="${target}"]`);
+    if (page) setDragDropCell(cellFromPagePoint(page, dragState.lastX, dragState.lastY));
+    clearEdgeTurnTimer();
+  }, 520);
+}
+
+function endIconDrag(save) {
+  const wasActive = dragState.active;
+  const appId = dragState.appId;
+  const originalLayout = dragState.originalLayout ? { ...dragState.originalLayout } : { ...appLayout };
+  const sourceCell = dragState.sourceCell;
+  const dropCell = dragState.dropCell;
+  clearLongPressTimer();
+  clearEdgeTurnTimer();
+  dragState.ghost?.remove();
+  dragState.active = false;
+  dragState.appId = null;
+  dragState.pointerId = null;
+  dragState.sourceCell = null;
+  dragState.dropCell = null;
+  dragState.originalLayout = null;
+  dragState.lastX = 0;
+  dragState.lastY = 0;
+  dragState.ghost = null;
+  document.getElementById('appPages').classList.remove('dragging');
+
+  if (save && wasActive && appId && Number.isInteger(dropCell)) {
+    appLayout = { ...originalLayout };
+    const targetId = getAppIdAtCell(appLayout, dropCell, appId);
+    if (targetId && Number.isInteger(sourceCell)) appLayout[targetId] = sourceCell;
+    appLayout[appId] = dropCell;
+    appLayout = normalizeLayout(appLayout);
+    layoutRevision += 1;
+    saveLayout();
+    suppressClicksUntil = Date.now() + 420;
+    showToast('图标位置已保存');
+  } else {
+    appLayout = originalLayout;
+  }
+  renderApps();
+}
+
+function handleHomeResize() {
+  const oldCapacity = pageCapacity;
+  renderApps();
+  if (pageCapacity !== oldCapacity) updatePager(false);
 }
 
 /* ── 打开应用 ── */
@@ -503,7 +1169,12 @@ function openApp(url) {
     if (typeof window.parent.openSubPage === 'function') {
       const screen = document.getElementById('screen');
       screen.classList.add('navigating');
-      setTimeout(() => window.parent.openSubPage(url), 200);
+      setTimeout(() => {
+        window.parent.openSubPage(url);
+        // Home is kept alive in the parent now. Clear the one-shot fade state
+        // after hiding it, otherwise returning shows only the parent backdrop.
+        screen.classList.remove('navigating');
+      }, 200);
       return;
     }
   }
@@ -625,10 +1296,32 @@ function updateClock() {
 }
 
 /* ── 初始化 ── */
+loadLayout();
 renderApps();
+syncLayoutFromServer();
 updateClock();
 setInterval(updateClock, 15000);
 document.getElementById('clockWidget').addEventListener('click', toggleAionTheme);
+document.getElementById('appPages').addEventListener('pointerdown', handlePagesPointerDown);
+document.getElementById('appPages').addEventListener('pointermove', handlePagesPointerMove);
+document.getElementById('appPages').addEventListener('pointerup', handlePagesPointerUp);
+document.getElementById('appPages').addEventListener('pointercancel', e => {
+  if (dragState.active) endIconDrag(false);
+  resetGesture(e.pointerId, document.getElementById('appPages'));
+});
+document.getElementById('appPages').addEventListener('click', handleAppClick);
+document.getElementById('appPages').addEventListener('keydown', handleAppKeydown);
+document.getElementById('dock').addEventListener('click', handleAppClick);
+document.getElementById('dock').addEventListener('keydown', handleAppKeydown);
+document.getElementById('pageDots').addEventListener('click', e => {
+  const dot = e.target.closest('.page-dot');
+  if (dot) setCurrentPage(Number(dot.dataset.page));
+});
+window.addEventListener('resize', handleHomeResize);
+window.addEventListener('focus', requestLayoutSync);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) requestLayoutSync();
+});
 document.getElementById('globalSearchForm').addEventListener('submit', runGlobalSearch);
 document.getElementById('globalSearchOverlay').addEventListener('click', e => {
   if (e.target.id === 'globalSearchOverlay') closeGlobalSearch();

@@ -137,7 +137,7 @@ def _timeline_names() -> dict:
         "user": wb.get("user_name", "用户"),
         "assistant": wb.get("ai_name", "AI"),
         "aion": wb.get("ai_name", "AI"),
-        "connor": cr.get("connor_name", "Connor"),
+        "connor": cr.get("connor_name", "第二位AI"),
         "system": "系统",
     }
 
@@ -184,7 +184,16 @@ def _idle_event_timeline_title(row, actor: str, shown_diary_ids: set[str], shown
             return None
         if result_type not in ("diary", "moment"):
             return None
-    if action not in ("home_dynamics", "memory_browse", "memory_browse_result", "seeky_interaction"):
+    if action not in (
+        "home_dynamics",
+        "memory_browse",
+        "memory_browse_result",
+        "seeky_interaction",
+        "role_chat",
+        "cam_check",
+        "wish_pool",
+        "error",
+    ):
         return None
     return row["title"]
 
@@ -257,6 +266,21 @@ async def get_timeline(hours: int = 24, limit: int = 300):
                 r["created_at"], "idle_event", actor,
                 title, _clip(r["detail"]), r["id"],
             ))
+
+    for entry in read_recent_activity(hours):
+        if entry.get("device") != "home" or entry.get("kind") != "home_sensor":
+            continue
+        ts = float(entry.get("timestamp") or 0)
+        if ts < cutoff:
+            continue
+        title = str(entry.get("title") or "").strip()
+        if not title:
+            continue
+        items.append(_timeline_item(
+            ts, "home_sensor", user_name,
+            title, _clip(entry.get("detail") or entry.get("sensor_label") or ""),
+            str(entry.get("entity_id") or ""),
+        ))
 
     status = load_location_status()
     changed_at = float(status.get("state_changed_at") or 0)

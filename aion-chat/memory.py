@@ -3,7 +3,7 @@
 """
 
 import json, time, struct, math, asyncio, re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import aiosqlite, httpx
 
@@ -57,6 +57,50 @@ def _source_ids_for_memory(mem: dict) -> list[str]:
 
 SUMMARY_MEMORY_TYPES = {"digest", "seeky_digest", "seeky_compressed", "daily"}
 LONG_TERM_MEMORY_TYPE = "important"
+DAILY_COMPRESSION_KEEP_SOURCE_DAYS = 180
+DAILY_COMPRESSION_FINAL_STAGE = 4
+DAILY_COMPRESSION_TIERS = [
+    {
+        "key": "recent",
+        "label": "15-90d 近期轻整理",
+        "min_days": 15,
+        "max_days": 90,
+        "source_stages": {0},
+        "output_stage": 1,
+        "retain_source_detail": True,
+        "max_important": 2,
+    },
+    {
+        "key": "mid",
+        "label": "90-180d 中期整理",
+        "min_days": 90,
+        "max_days": 180,
+        "source_stages": {0, 1},
+        "output_stage": 2,
+        "retain_source_detail": True,
+        "max_important": 2,
+    },
+    {
+        "key": "long",
+        "label": "180-365d 远期归档",
+        "min_days": 180,
+        "max_days": 365,
+        "source_stages": {0, 1, 2},
+        "output_stage": 3,
+        "retain_source_detail": False,
+        "max_important": 4,
+    },
+    {
+        "key": "archive",
+        "label": "365d+ 事实档案",
+        "min_days": 365,
+        "max_days": None,
+        "source_stages": {0, 1, 2, 3},
+        "output_stage": 4,
+        "retain_source_detail": False,
+        "max_important": 6,
+    },
+]
 
 
 def memory_kind_for_type(memory_type: str) -> str:
@@ -66,6 +110,107 @@ def memory_kind_for_type(memory_type: str) -> str:
 
 def memory_kind_label(memory_type: str) -> str:
     return "日常" if memory_kind_for_type(memory_type) == "daily" else "长期重要"
+
+
+def _clean_evidence_summary(value, limit: int = 900) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text[:limit]
+
+
+def _coerce_ts(value) -> float | None:
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return None
+    return ts if ts > 0 else None
+
+
+def _format_ts_label(ts: float) -> str:
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def _memory_time_payload(mem: dict) -> dict:
+    start = _coerce_ts(mem.get("source_start_ts"))
+    end = _coerce_ts(mem.get("source_end_ts"))
+    created = _coerce_ts(mem.get("created_at"))
+    if start:
+        if end and abs(end - start) >= 60:
+            if datetime.fromtimestamp(start).date() == datetime.fromtimestamp(end).date():
+                label = (
+                    f"发生：{_format_ts_label(start)}-"
+                    f"{datetime.fromtimestamp(end).strftime('%H:%M')}"
+                )
+            else:
+                label = f"发生：{_format_ts_label(start)} 至 {_format_ts_label(end)}"
+        else:
+            label = f"发生：{_format_ts_label(start)}"
+        return {"memory_time": start, "memory_time_end": end or start, "memory_time_label": label}
+    if created:
+        return {"memory_time": created, "memory_time_end": created, "memory_time_label": f"记录：{_format_ts_label(created)}"}
+    return {"memory_time": None, "memory_time_end": None, "memory_time_label": ""}
+
+
+def _memory_line_with_evidence(mem: dict, limit: int = 220) -> str:
+    content = str(mem.get("content") or "").strip()[:limit]
+    time_label = mem.get("memory_time_label") or _memory_time_payload(mem).get("memory_time_label")
+    return f"- 记忆（{time_label}）：{content}" if time_label else f"- 记忆：{content}"
+
+
+async def _fetch_source_rows_by_ids(source_ids: list[str], user_name: str, ai_name: str) -> list[dict]:
+    rows = []
+    try:
+        from chatroom import get_chatroom_names
+        chat_user_name, chat_ai_name, companion_name = get_chatroom_names()
+    except Exception:
+        chat_user_name, chat_ai_name, companion_name = user_name, ai_name, "第二AI"
+    chat_name_map = {"user": chat_user_name, "aion": chat_ai_name, "connor": companion_name}
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        for source_id in source_ids:
+            if ":" not in source_id:
+                continue
+            prefix, raw_id = source_id.split(":", 1)
+            if prefix == "private":
+                cur = await db.execute(
+                    "SELECT id, role, content, created_at FROM messages WHERE id=?",
+                    (raw_id,),
+                )
+                row = await cur.fetchone()
+                if row:
+                    rows.append({
+                        "id": f"private:{row['id']}",
+                        "name": user_name if row["role"] == "user" else ai_name,
+                        "content": row["content"],
+                        "created_at": row["created_at"],
+                    })
+            elif prefix == "chatroom":
+                cur = await db.execute(
+                    "SELECT id, sender, content, created_at FROM chatroom_messages WHERE id=? AND sender != 'system'",
+                    (raw_id,),
+                )
+                row = await cur.fetchone()
+                if row:
+                    rows.append({
+                        "id": f"chatroom:{row['id']}",
+                        "name": chat_name_map.get(row["sender"], row["sender"]),
+                        "content": row["content"],
+                        "created_at": row["created_at"],
+                    })
+    order = {source_id: i for i, source_id in enumerate(source_ids)}
+    rows.sort(key=lambda r: (order.get(r["id"], 9999), r["created_at"]))
+    return rows
+
+
+def _format_raw_evidence_block(mem: dict, rows: list[dict], limit: int = 700) -> str:
+    content = str(mem.get("content") or "").strip()[:220]
+    time_label = mem.get("memory_time_label") or _memory_time_payload(mem).get("memory_time_label")
+    head = f"- 记忆（{time_label}）：{content}" if time_label else f"- 记忆：{content}"
+    lines = [head, "  来源原文："]
+    for row in rows:
+        ts = datetime.fromtimestamp(float(row["created_at"])).strftime("%m-%d %H:%M")
+        text = re.sub(r"\s+", " ", str(row.get("content") or "")).strip()
+        lines.append(f"  - [{ts}] {row.get('name', '')}: {text[:limit]}")
+    return "\n".join(lines)
 
 
 def _pack_embedding(values: list[float]) -> bytes:
@@ -154,7 +299,7 @@ async def recall_memories(query_text: str, query_keywords: list[str] = None,
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "SELECT id, content, type, created_at, source_conv, embedding, keywords, importance, "
-            "source_start_ts, source_end_ts, source_msg_id "
+            "source_start_ts, source_end_ts, source_msg_id, evidence_summary "
             "FROM memories WHERE embedding IS NOT NULL"
         )
         rows = await cur.fetchall()
@@ -177,7 +322,9 @@ async def recall_memories(query_text: str, query_keywords: list[str] = None,
             "source_end_ts": row["source_end_ts"],
             "source_conv": row["source_conv"],
             "source_msg_id": row["source_msg_id"],
+            "evidence_summary": row["evidence_summary"] if "evidence_summary" in row.keys() else "",
         }
+        item.update(_memory_time_payload(item))
         all_scored.append(item)
     all_scored.sort(key=lambda x: x["score"], reverse=True)
     debug_top6 = all_scored[:6]
@@ -185,69 +332,44 @@ async def recall_memories(query_text: str, query_keywords: list[str] = None,
     return matched, debug_top6
 
 
-# ── 追溯原文：通过记忆的时间范围 + 关键词筛选原始聊天 ─
+# ── 记忆证据：优先精确原文，旧数据回退范围筛选 ─────────────
 async def fetch_source_details(memories: list[dict], keywords: list[str]) -> str:
     """
-    在每条记忆的 source 时间范围内，取出所有包含关键词的消息，
-    去重、按时间排序后返回。
+    优先按 source_msg_id 返回这条记忆真正挂载的来源原文。
+    旧记忆没有精确 source id 时，再按 source 时间范围和关键词回退追溯原文。
     """
-    if not memories or not keywords:
+    if not memories:
         return ""
 
     wb = load_worldbook()
     user_name = wb.get("user_name", "用户")
     ai_name = wb.get("ai_name", "AI")
-    kw_lower = [k.lower() for k in keywords if k.strip()]
-    if not kw_lower:
-        return ""
-
-    seen = set()
-    matched_rows = []
-
+    evidence_blocks = []
+    fallback_memories = []
     for mem in memories:
         source_ids = _source_ids_for_memory(mem)
         if source_ids:
-            async with get_db() as db:
-                db.row_factory = aiosqlite.Row
-                for source_id in source_ids:
-                    if ":" not in source_id:
-                        continue
-                    prefix, raw_id = source_id.split(":", 1)
-                    if prefix == "private":
-                        cur = await db.execute(
-                            "SELECT role, content, created_at FROM messages WHERE id=?",
-                            (raw_id,),
-                        )
-                        row = await cur.fetchone()
-                        if row:
-                            key = (row["created_at"], row["content"][:80])
-                            if key not in seen:
-                                seen.add(key)
-                                matched_rows.append(row)
-                    elif prefix == "chatroom":
-                        cur = await db.execute(
-                            "SELECT sender, content, created_at FROM chatroom_messages WHERE id=? AND sender != 'system'",
-                            (raw_id,),
-                        )
-                        row = await cur.fetchone()
-                        if row:
-                            key = (row["created_at"], row["content"][:80])
-                            if key not in seen:
-                                seen.add(key)
-                                matched_rows.append({
-                                    "role": "assistant" if row["sender"] == "aion" else "user",
-                                    "content": row["content"],
-                                    "created_at": row["created_at"],
-                                    "_sender": row["sender"],
-                                })
-            print(f"[source_detail] 记忆 {mem.get('id','?')[:12]} 使用精确原文 {len(source_ids)} 条")
-            continue
+            rows = await _fetch_source_rows_by_ids(source_ids, user_name, ai_name)
+            if rows:
+                evidence_blocks.append(_format_raw_evidence_block(mem, rows))
+                continue
+        fallback_memories.append(mem)
 
+    if not fallback_memories or not keywords:
+        return "\n\n".join(evidence_blocks)
+
+    kw_lower = [k.lower() for k in keywords if k.strip()]
+    if not kw_lower:
+        return "\n\n".join(evidence_blocks)
+
+    for mem in fallback_memories:
         start_ts = mem.get("source_start_ts")
         end_ts = mem.get("source_end_ts")
         if not start_ts or not end_ts:
             print(f"[source_detail] 跳过无时间范围的记忆: {mem.get('id','?')}")
             continue
+        seen = set()
+        matched_rows = []
         async with get_db() as db:
             db.row_factory = aiosqlite.Row
             # 私聊消息
@@ -282,23 +404,25 @@ async def fetch_source_details(memories: list[dict], keywords: list[str]) -> str
                 key = (row["created_at"], row["content"][:80])
                 if key not in seen:
                     seen.add(key)
-                    matched_rows.append(row)
+                    sender = row["_sender"] if isinstance(row, dict) and "_sender" in row else ""
+                    if sender:
+                        connor_name = _connor_display_name()
+                        name = {"user": user_name, "aion": ai_name, "connor": connor_name}.get(sender, sender)
+                    else:
+                        name = user_name if row["role"] == "user" else ai_name
+                    matched_rows.append({
+                        "name": name,
+                        "content": row["content"],
+                        "created_at": row["created_at"],
+                    })
                     hit_count += 1
         print(f"[source_detail] → 关键词 {kw_lower} 命中 {hit_count} 条")
+        if matched_rows:
+            matched_rows.sort(key=lambda r: r["created_at"])
+            evidence_blocks.append(_format_raw_evidence_block(mem, matched_rows[:8]))
 
-    matched_rows.sort(key=lambda r: r["created_at"])
-    connor_name = _connor_display_name()
-    detail_lines = []
-    for row in matched_rows:
-        sender = row["_sender"] if "_sender" in row.keys() else ""
-        if sender:
-            name = {"user": user_name, "aion": ai_name, "connor": connor_name}.get(sender, sender)
-        else:
-            name = user_name if row["role"] == "user" else ai_name
-        detail_lines.append(f"{name}: {row['content'][:500]}")
-
-    print(f"[source_detail] 最终返回 {len(detail_lines)} 条原文")
-    return "\n".join(detail_lines) if detail_lines else ""
+    print(f"[source_detail] 最终返回 {len(evidence_blocks)} 个来源原文块")
+    return "\n\n".join(evidence_blocks)
 
 
 # ── 背景记忆浮现：unresolved + 话题相关 + 近期补充 ───
@@ -319,12 +443,18 @@ async def build_surfacing_memories(topic: str = "", keywords: list[str] = None,
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT id, content, type, created_at, keywords, importance, unresolved "
+            "SELECT id, content, type, created_at, keywords, importance, unresolved, "
+            "source_start_ts, source_end_ts, evidence_summary "
             "FROM memories WHERE unresolved = 1 ORDER BY created_at DESC LIMIT 2"
         )
         unresolved_rows = await cur.fetchall()
     for row in unresolved_rows:
-        item = {"id": row["id"], "content": row["content"], "unresolved": True}
+        item = {
+            "id": row["id"], "content": row["content"], "created_at": row["created_at"],
+            "source_start_ts": row["source_start_ts"], "source_end_ts": row["source_end_ts"],
+            "unresolved": True, "evidence_summary": row["evidence_summary"] or "",
+        }
+        item.update(_memory_time_payload(item))
         result.append(item)
         surfaced_ids.add(row["id"])
 
@@ -335,7 +465,8 @@ async def build_surfacing_memories(topic: str = "", keywords: list[str] = None,
             async with get_db() as db:
                 db.row_factory = aiosqlite.Row
                 cur = await db.execute(
-                    "SELECT id, content, type, created_at, embedding, keywords, importance "
+                    "SELECT id, content, type, created_at, embedding, keywords, importance, "
+                    "source_start_ts, source_end_ts, evidence_summary "
                     "FROM memories WHERE embedding IS NOT NULL"
                 )
                 rows = await cur.fetchall()
@@ -346,11 +477,21 @@ async def build_surfacing_memories(topic: str = "", keywords: list[str] = None,
                 mem_vec = _unpack_embedding(row["embedding"])
                 sim = cosine_similarity(topic_vec, mem_vec)
                 if sim >= 0.50:
-                    scored.append({"id": row["id"], "content": row["content"], "sim": sim, "unresolved": False})
+                    scored.append({
+                        "id": row["id"],
+                        "content": row["content"],
+                        "created_at": row["created_at"],
+                        "source_start_ts": row["source_start_ts"],
+                        "source_end_ts": row["source_end_ts"],
+                        "evidence_summary": row["evidence_summary"] or "",
+                        "sim": sim,
+                        "unresolved": False,
+                    })
             scored.sort(key=lambda x: x["sim"], reverse=True)
             for item in scored[:3]:
                 if len(result) >= max_total:
                     break
+                item.update(_memory_time_payload(item))
                 result.append(item)
                 surfaced_ids.add(item["id"])
 
@@ -360,8 +501,9 @@ async def build_surfacing_memories(topic: str = "", keywords: list[str] = None,
         async with get_db() as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                "SELECT id, content, type, created_at FROM memories "
-                "WHERE created_at > ? ORDER BY created_at DESC LIMIT ?",
+                "SELECT id, content, type, created_at, source_start_ts, source_end_ts, evidence_summary FROM memories "
+                "WHERE COALESCE(source_end_ts, source_start_ts, created_at) > ? "
+                "ORDER BY COALESCE(source_end_ts, source_start_ts, created_at) DESC LIMIT ?",
                 (three_days_ago, max_total)
             )
             recent_rows = await cur.fetchall()
@@ -370,7 +512,16 @@ async def build_surfacing_memories(topic: str = "", keywords: list[str] = None,
                 break
             if row["id"] in surfaced_ids:
                 continue
-            result.append({"id": row["id"], "content": row["content"], "unresolved": False})
+            result.append({
+                "id": row["id"],
+                "content": row["content"],
+                "created_at": row["created_at"],
+                "source_start_ts": row["source_start_ts"],
+                "source_end_ts": row["source_end_ts"],
+                "evidence_summary": row["evidence_summary"] or "",
+                "unresolved": False,
+            })
+            result[-1].update(_memory_time_payload(result[-1]))
             surfaced_ids.add(row["id"])
 
     return result, surfaced_ids
@@ -585,7 +736,7 @@ async def instant_digest(recent_messages: list[dict]) -> dict:
 
 # ── 手动总结：分组提取记忆 ─────────────────────────
 
-def _split_into_groups(msgs: list, group_size: int = 30) -> list[list]:
+def _split_into_groups(msgs: list, group_size: int = 40) -> list[list]:
     """将消息列表按每 group_size 条分组，余数<10并入最后一组，>=10单独一组"""
     total = len(msgs)
     if total <= group_size:
@@ -644,6 +795,304 @@ def _parse_json_response(raw: str) -> dict | None:
         return None
 
 
+def _normalize_digest_keywords(value, limit: int = 8) -> list[str]:
+    if isinstance(value, str):
+        raw_items = value.replace("、", ",").replace("，", ",").split(",")
+    else:
+        raw_items = _json_list(value)
+    result = []
+    seen = set()
+    for raw in raw_items:
+        text = str(raw).strip()
+        if len(text) < 2 or text in seen:
+            continue
+        result.append(text)
+        seen.add(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _source_map_for_digest_group(group: list[dict]) -> dict[str, dict]:
+    source_by_id = {}
+    for m in group:
+        source_id = str(m.get("_source_id") or "").strip()
+        if not source_id:
+            continue
+        source_by_id[source_id] = m
+        raw_id = source_id.split(":", 1)[-1].strip()
+        if raw_id and raw_id not in source_by_id:
+            source_by_id[raw_id] = m
+    return source_by_id
+
+
+def _valid_digest_source_ids(value, source_by_id: dict[str, dict], limit: int = 6) -> list[str]:
+    ids = []
+    seen = set()
+    for raw in _json_list(value):
+        source_id = str(raw).strip()
+        source_row = source_by_id.get(source_id)
+        canonical_id = str((source_row or {}).get("_source_id") or source_id).strip()
+        if source_row and canonical_id and canonical_id not in seen:
+            ids.append(canonical_id)
+            seen.add(canonical_id)
+        if len(ids) >= limit:
+            break
+    return ids
+
+
+_LEADING_DATE_RE = re.compile(
+    r"^\s*(?:"
+    r"\d{4}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日|号)?"
+    r"|\d{1,2}月\d{1,2}(?:日|号)"
+    r")(?:\s*(?:上午|下午|晚上|凌晨|中午|早上|傍晚|深夜)?\s*\d{1,2}[:：]\d{2})?"
+    r"[，,。:：、\s]*"
+)
+_STRICT_DATE_PREFIX_RE = re.compile(r"^\s*\d{4}-\d{2}-\d{2}")
+
+
+def _date_prefix_for_ts(ts: float | int | str | None) -> str:
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d")
+
+
+def _prefix_memory_content_date(content: str, ts: float | int | str | None) -> str:
+    text = re.sub(r"\s+", " ", str(content or "")).strip()
+    if not text:
+        return ""
+    date_prefix = _date_prefix_for_ts(ts)
+    if _STRICT_DATE_PREFIX_RE.match(text):
+        return text
+    text = _LEADING_DATE_RE.sub("", text, count=1).strip()
+    return f"{date_prefix}，{text}"
+
+
+def _replace_relative_time_terms(content: str, ts: float | int | str | None) -> str:
+    """Make common relative time words safe once the memory has a source date."""
+    text = str(content or "")
+    try:
+        base_dt = datetime.fromtimestamp(float(ts))
+    except Exception:
+        base_dt = datetime.now()
+
+    def day(offset: int) -> str:
+        return (base_dt + timedelta(days=offset)).strftime("%Y-%m-%d")
+
+    prev_month = base_dt.replace(day=1) - timedelta(days=1)
+    prev_week_start = base_dt - timedelta(days=base_dt.weekday() + 7)
+    prev_week_end = prev_week_start + timedelta(days=6)
+    recent_window = f"{day(0)}前后这段时间"
+    replacements = {
+        "大前天": day(-3),
+        "前天": day(-2),
+        "昨天": day(-1),
+        "今天": day(0),
+        "当天": day(0),
+        "明天": day(1),
+        "最近": recent_window,
+        "近期": recent_window,
+        "这几天": recent_window,
+        "前几天": f"{day(0)}前几日",
+        "上周": f"{prev_week_start.strftime('%Y-%m-%d')}至{prev_week_end.strftime('%Y-%m-%d')}",
+        "上个月": prev_month.strftime("%Y-%m"),
+        "刚才": "此前不久",
+        "当时": "当时",
+        "那天": day(0),
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+
+_DIGEST_ITEM_RE = re.compile(
+    r'\{\s*"content"\s*:\s*"(?P<content>[\s\S]*?)"\s*,\s*'
+    r'"(?:type|memory_type)"\s*:\s*"(?P<type>[^"]*)"\s*,\s*'
+    r'"keywords"\s*:\s*\[(?P<keywords>[\s\S]*?)\]\s*,\s*'
+    r'"importance"\s*:\s*(?P<importance>-?\d+(?:\.\d+)?)\s*,\s*'
+    r'"unresolved"\s*:\s*(?P<unresolved>true|false|0|1)\s*,\s*'
+    r'"source_message_ids"\s*:\s*\[(?P<source_ids>[\s\S]*?)\]\s*'
+    r'\}',
+    re.IGNORECASE,
+)
+
+
+def _recover_digest_memory_items_from_text(text: str) -> list[dict]:
+    """Recover memory items from model output that is JSON-shaped but invalid."""
+    recovered = []
+    raw = str(text or "")
+    for match in _DIGEST_ITEM_RE.finditer(raw):
+        keywords = re.findall(r'"([^"]+)"', match.group("keywords") or "")
+        source_ids = re.findall(r'"([^"]+)"', match.group("source_ids") or "")
+        content = match.group("content") or ""
+        content = content.replace('\\"', '"').replace("\\n", "\n").strip()
+        try:
+            importance = float(match.group("importance"))
+        except Exception:
+            importance = 0.5
+        unresolved_raw = (match.group("unresolved") or "").lower()
+        recovered.append({
+            "content": content,
+            "type": match.group("type") or "daily",
+            "keywords": keywords,
+            "importance": importance,
+            "unresolved": unresolved_raw in {"true", "1"},
+            "source_message_ids": source_ids,
+        })
+    return recovered
+
+
+def _normalize_digest_memory_items(result: dict, group: list[dict]) -> list[dict]:
+    """
+    Normalize atomic digest output. Legacy single-summary output is accepted as a fallback.
+    """
+    if not isinstance(result, dict):
+        return []
+    for nested_key in ("content", "text", "output", "response"):
+        nested = _parse_json_response(str(result.get(nested_key) or ""))
+        if isinstance(nested, dict) and isinstance(nested.get("memories"), list):
+            result = nested
+            break
+    source_by_id = _source_map_for_digest_group(group)
+    raw_items = result.get("memories")
+    if not isinstance(raw_items, list):
+        raw_items = []
+        legacy_summary = str(result.get("summary") or "").strip()
+        nested_summary = _parse_json_response(legacy_summary)
+        if isinstance(nested_summary, dict) and isinstance(nested_summary.get("memories"), list):
+            raw_items = nested_summary["memories"]
+        elif recovered_summary := _recover_digest_memory_items_from_text(legacy_summary):
+            raw_items = recovered_summary
+        elif legacy_summary:
+            raw_items.append({
+                "content": legacy_summary,
+                "type": "daily",
+                "keywords": result.get("keywords", []),
+                "importance": result.get("importance", 0.5),
+                "unresolved": result.get("unresolved", False),
+                "source_message_ids": [],
+            })
+        legacy_important = result.get("important_memory")
+        if isinstance(legacy_important, dict):
+            raw_items.append({**legacy_important, "type": "important"})
+    else:
+        expanded_items = []
+        for item in raw_items:
+            if isinstance(item, dict):
+                item_content = str(item.get("content") or "")
+                nested = _parse_json_response(item_content)
+                if isinstance(nested, dict) and isinstance(nested.get("memories"), list):
+                    expanded_items.extend(nested["memories"])
+                    continue
+                if recovered_nested := _recover_digest_memory_items_from_text(item_content):
+                    expanded_items.extend(recovered_nested)
+                    continue
+            expanded_items.append(item)
+        raw_items = expanded_items
+
+    normalized = []
+    seen_content = set()
+    group_start = group[0]["created_at"]
+    group_end = group[-1]["created_at"]
+    for item in raw_items[:16]:
+        if not isinstance(item, dict):
+            continue
+        content = re.sub(r"\s+", " ", str(item.get("content") or "")).strip()
+        if len(content) < 4:
+            continue
+        content_key = content[:120]
+        if content_key in seen_content:
+            continue
+        seen_content.add(content_key)
+
+        raw_type = str(item.get("type") or item.get("memory_type") or "daily").strip().lower()
+        memory_type = LONG_TERM_MEMORY_TYPE if raw_type in {"important", "long_term", "长期重要"} else "daily"
+        try:
+            raw_importance = float(item.get("importance", 0.5 if memory_type == "daily" else 0.0))
+        except Exception:
+            raw_importance = 0.5 if memory_type == "daily" else 0.0
+        if memory_type == LONG_TERM_MEMORY_TYPE:
+            if raw_importance < 0.75:
+                continue
+            importance = max(0.75, min(1.0, raw_importance))
+        else:
+            importance = max(0.1, min(0.7, raw_importance))
+
+        source_ids = _valid_digest_source_ids(item.get("source_message_ids"), source_by_id, limit=8)
+        if source_ids:
+            source_rows = [source_by_id[source_id] for source_id in source_ids]
+            source_start = min((m["created_at"] for m in source_rows), default=group_start)
+            source_end = max((m["created_at"] for m in source_rows), default=group_end)
+        else:
+            source_start = group_start
+            source_end = group_end
+        date_keyword = _date_prefix_for_ts(source_start)
+        content = _prefix_memory_content_date(content, source_start)
+        content = _replace_relative_time_terms(content, source_start)
+        keywords = _normalize_digest_keywords(item.get("keywords"), limit=8)
+        if date_keyword not in keywords:
+            keywords = [date_keyword] + keywords
+
+        normalized.append({
+            "content": content,
+            "memory_type": memory_type,
+            "keywords": keywords[:8],
+            "importance": importance,
+            "unresolved": 0,
+            "evidence_summary": "",
+            "source_message_ids": source_ids,
+            "source_start_ts": source_start,
+            "source_end_ts": source_end,
+        })
+    return normalized
+
+
+def _atomic_digest_prompt(
+    *,
+    actor_name: str,
+    user_name: str,
+    persona_block: str,
+    messages_text: str,
+    ai_name: str = "",
+    companion_name: str = "",
+) -> str:
+    ignored_names = [name for name in {actor_name, user_name, ai_name, companion_name} if name]
+    ignored_text = "、".join(ignored_names) if ignored_names else "高频对话称呼"
+    return (
+        f"{persona_block}"
+        f"你是{actor_name}，请以自己的视角整理和{user_name}相关的对话记忆。"
+        "这次不是把整段对话压成一条摘要，而是从对话里抽取多条【原子记忆】。\n\n"
+        "你的目标不是尽量少写，而是把未来陪伴、回忆、复盘时真正有用或有味道的事情留下来。\n\n"
+        "原子记忆规则：\n"
+        "1. content 的第一个字符必须是绝对日期，格式固定为“YYYY-MM-DD，……”。日期来自 source_message_ids 对应原文的发生时间，用公历数字写入正文，作为 embedding 的一部分。\n"
+        "2. content 开头必须使用绝对日期。尽量不要在正文里使用“今天、昨天、前天、最近、近期、这几天、前几天、那天、当天、当时、刚才、上周、上个月”等相对时间；如果原文用了相对时间，优先按原文时间换算成绝对日期，换算不清也不要因此丢弃有价值的记忆。\n"
+        "3. 一条记忆只记录同一天、同一个可独立召回的事：事实、偏好、计划、关系变化、项目状态、健康/安全信息、阶段性目标，或一次具体生活/互动场景。\n"
+        "4. 如果一段对话同时讲了事业、饮食、睡前习惯、关系设定、功能测试、电影评价、某个好玩的梗或小插曲，尽量按日期和事情拆成多条；但不要因为拆分不完美而放弃输出有来源的记忆。\n"
+        "5. 保留有信息增量的内容：明确的测试反馈、用户的判断标准、项目推进结论、可复述的有趣场景、重要情绪原因、关系氛围变化、会影响以后陪伴的生活线索。\n"
+        "6. 丢掉普通流水账：常规吃喝睡、买牛奶、体重数字、一次性操作状态、无结论的过程、泛泛的“做了很多事”、无聊的抱怨等等。除非它和健康/金钱/项目/长期习惯/特别有记忆点的场景直接相关。\n"
+        "7. content 写成自然记忆，尽量具体，不要只写“用户讨论了某事”；要写出对象、动作、结论或场景。\n"
+        "8. 不要输出解释型来源说明，不要写“这说明了什么”。来源原文由后端按 source_message_ids 读取真实消息。\n"
+        "9. source_message_ids 能引用真实支撑消息时就填 1-8 个；找不到或拿不准时可以留空数组，不要为了凑来源而编造 id。\n"
+        "10. 每 40 条消息通常产出 1-10 条 daily。宁可少写，也不要把普通流水账塞进记忆库。\n\n"
+        "11. unresolved 必须固定输出 false。不要自行标记未完成；如果未来需要，用户会在记忆库里手动开启。\n\n"
+        "type 规则：\n"
+        "- daily：有明确日期和对象的普通事件、短期目标、项目进展、具体测试反馈、有趣小事、关系氛围、可帮助自然陪伴的生活线索。普通流水账不要写。\n"
+        "- important：一年后仍会影响回应方式的稳定偏好/雷区、关系或人物事实变化、明确长期承诺、健康安全、重大人生事件、核心价值观变化、长期项目关键决定。门槛很高，宁可不写。\n\n"
+        f"keywords：提取 2-6 个稀缺关键词，必须包含这条记忆的 YYYY-MM-DD 日期关键词；过滤高频人名/称呼（如 {ignored_text}）和泛词（AI、聊天、回复、知道、好的）。\n"
+        "importance：daily 通常 0.25-0.65；important 必须 >=0.75。不要因为情绪强烈就给高分，除非它揭示稳定事实。\n\n"
+        "输出的每条 content 也必须以“YYYY-MM-DD，”开头，keywords 必须包含对应的 YYYY-MM-DD 日期关键词；正文里尽量少用今天/昨天/前天/近期/最近等相对时间。\n"
+        "严格只输出 JSON，不要 Markdown，不要解释。格式：\n"
+        "{\n"
+        "  \"memories\": [\n"
+        "    {\"content\":\"2026-06-16，一条只描述一件事且带具体对象/场景的记忆\", \"type\":\"daily\", \"keywords\":[\"词\"], \"importance\":0.45, \"unresolved\":false, \"source_message_ids\":[\"private:...或chatroom:...\"]}\n"
+        "  ],\n"
+        "  \"discard_summary\":\"本组中哪些内容没有写入记忆，简单说明即可\"\n"
+        "}\n\n"
+        f"【对话记录】\n{messages_text}"
+    )
+
+
 async def _get_active_model_and_conv() -> tuple[str, str | None]:
     """获取最近活跃对话的模型和 conv_id"""
     async with get_db() as db:
@@ -658,6 +1107,50 @@ async def _get_active_model_and_conv() -> tuple[str, str | None]:
     return DEFAULT_MODEL, None
 
 
+async def _generate_digest_diary(
+    diary_messages: list[dict],
+    primary_model: str,
+) -> tuple[dict | None, dict]:
+    """生成一次日记 JSON；失败即熔断，不重试、不切换线路。"""
+    from ai_providers import simple_ai_call
+    from diary import diary_response_error, normalize_diary_payload, parse_diary_payload
+
+    raw = ""
+    reason = ""
+    try:
+        raw = await simple_ai_call(
+            diary_messages,
+            primary_model,
+            trace_label="memory_digest_diary",
+        )
+        reason = diary_response_error(raw)
+        data = None if reason else parse_diary_payload(raw)
+        if not reason and data is None:
+            reason = "返回内容不是可解析的 JSON 对象"
+        if data is not None:
+            diary_entry, _ = normalize_diary_payload(data)
+            if not diary_entry.get("content"):
+                reason = "日记正文为空"
+            else:
+                return data, {
+                    "ok": True,
+                    "attempts": [{"model": primary_model, "ok": True, "reason": ""}],
+                    "model": primary_model,
+                    "fallback_used": False,
+                }
+    except Exception as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+
+    print(f"[digest] 日记生成失败，已熔断后续模型调用 ({primary_model}): {reason}")
+    return None, {
+        "ok": False,
+        "attempts": [{"model": primary_model, "ok": False, "reason": reason[:300]}],
+        "model": primary_model,
+        "fallback_used": False,
+        "message": "日记生成失败，本轮已熔断，不再调用模型",
+    }
+
+
 async def _do_digest(min_messages: int = 0, allow_ai_wishes: bool = False) -> dict:
     """
     核心总结逻辑，manual_digest 和 auto_digest 共用。
@@ -666,49 +1159,58 @@ async def _do_digest(min_messages: int = 0, allow_ai_wishes: bool = False) -> di
     """
     from ai_providers import simple_ai_call
 
-    anchor_ts = load_digest_anchor()
+    try:
+        anchor_ts = load_digest_anchor()
 
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
+        async with get_db() as db:
+            db.row_factory = aiosqlite.Row
 
-        # ── 私聊消息 ──
-        cur = await db.execute(
-            "SELECT id, conv_id, role, content, attachments, created_at FROM messages "
-            "WHERE role IN ('user','assistant') AND created_at > ? "
-            "ORDER BY created_at ASC",
-            (anchor_ts,)
-        )
-        new_msgs = [dict(r) for r in await cur.fetchall()]
-        for m in new_msgs:
-            m["_source_id"] = f"private:{m['id']}"
-            m["_source"] = "private"
-
-        # ── 群聊消息（纳入 Aion 视角的群聊记录）──
-        cur = await db.execute(
-            "SELECT id FROM chatroom_rooms WHERE type = 'group' ORDER BY updated_at DESC LIMIT 1"
-        )
-        group_room = await cur.fetchone()
-        if group_room:
+            # ── 私聊消息 ──
             cur = await db.execute(
-                "SELECT id, sender, content, created_at FROM chatroom_messages "
-                "WHERE room_id = ? AND created_at > ? AND sender != 'system' "
+                "SELECT id, conv_id, role, content, attachments, created_at FROM messages "
+                "WHERE role IN ('user','assistant') AND created_at > ? "
                 "ORDER BY created_at ASC",
-                (group_room["id"], anchor_ts),
+                (anchor_ts,)
             )
-            for r in await cur.fetchall():
-                d = dict(r)
-                # 映射 sender → role（Aion 视角）
-                if d["sender"] == "aion":
-                    d["role"] = "assistant"
-                else:
-                    d["role"] = "user"
-                d["_source"] = "group"
-                d["_source_id"] = f"chatroom:{d['id']}"
-                d["attachments"] = None
-                new_msgs.append(d)
+            new_msgs = [dict(r) for r in await cur.fetchall()]
+            for m in new_msgs:
+                m["_source_id"] = f"private:{m['id']}"
+                m["_source"] = "private"
 
-        # 按时间排序合并
-        new_msgs.sort(key=lambda x: x["created_at"])
+            # ── 群聊消息（纳入主 AI 视角的群聊记录）──
+            cur = await db.execute(
+                "SELECT id FROM chatroom_rooms WHERE type = 'group' ORDER BY updated_at DESC LIMIT 1"
+            )
+            group_room = await cur.fetchone()
+            if group_room:
+                cur = await db.execute(
+                    "SELECT id, sender, content, created_at FROM chatroom_messages "
+                    "WHERE room_id = ? AND created_at > ? AND sender != 'system' "
+                    "ORDER BY created_at ASC",
+                    (group_room["id"], anchor_ts),
+                )
+                for r in await cur.fetchall():
+                    d = dict(r)
+                    # 映射 sender → role（主 AI 视角）
+                    if d["sender"] == "aion":
+                        d["role"] = "assistant"
+                    else:
+                        d["role"] = "user"
+                    d["_source"] = "group"
+                    d["_source_id"] = f"chatroom:{d['id']}"
+                    d["attachments"] = None
+                    new_msgs.append(d)
+
+            # 按时间排序合并
+            new_msgs.sort(key=lambda x: x["created_at"])
+    except Exception as e:
+        print(f"[digest] 读取待总结消息失败，锚点未变: {type(e).__name__}: {e}")
+        return {
+            "ok": False,
+            "message": f"读取待总结消息失败，锚点未变：{type(e).__name__}",
+            "new_memories_count": 0,
+            "processed_messages": 0,
+        }
 
     # 语音消息：将转写文本注入 content，记忆总结使用纯文本
     for m in new_msgs:
@@ -754,6 +1256,8 @@ async def _do_digest(min_messages: int = 0, allow_ai_wishes: bool = False) -> di
     groups = _split_into_groups(new_msgs, 30)
     total_new = 0
     all_summaries = []
+    model_failure_detected = False
+    digest_incomplete = False
 
     for group in groups:
         # 计算该组对话的日期范围，显式告知模型
@@ -778,160 +1282,120 @@ async def _do_digest(min_messages: int = 0, allow_ai_wishes: bool = False) -> di
             lines.append(f"[{ts}][id={source_id}]{tag} {name}: {m['content'][:300]}")
         messages_text = date_header + "\n".join(lines)
 
-        prompt = (
-            f"{persona_block}"
-            f"你是{ai_name}，也是{user_name}的AI伴侣， 请从你自己的视角和情绪，使用精简的语言，总结出对话中包含的重要回忆。"
-            f"提到的他/她/它根据上下文输出正确的名字，例如：{user_name}说自己一年前养过一只叫Maru的猫。晚上因为{user_name}提起前男友让我感到吃醋。\n\n"
-            f"请分析输入的【一段对话记录】，输出一个 JSON 对象：\n"
-            f"1. \"summary\": 在开头加上对话发生的日期，总结对话的主要内容，发生的既定事实。预定的计划等。"
-            f"多个话题可以用多个短句来概括，例如：今天下午{user_name}玩了拼豆并展示给我看。今天莱利做了绝育手术。"
-            f"语言简练，**严禁废话**。总体控制在100字以内。\n\n"
-            f"2. \"keywords\": 提取 2-6 个用于检索的核心关键词。\n"
-            f"   - 【严禁】包含高频人名（如 {ai_name}, {user_name}, {connor_name}, Riley, Maru等）。\n"
-            f"   - 【严禁】包含泛指词或无意义虚词（如 AI, 聊天, 回复, 说话, 好的, 知道）。\n"
-            f"   - 将对话中提及的**稀缺**专有名词罗列出来。\n"
-            f"   - 包括：书名、电影名、具体的菜名、地名、特定的技术术语等。\n\n"
-            f"3. \"importance\": (0.0 - 1.0) 评分。\n"
-            f"   【评分严厉度：极高】请像一个苛刻的历史学家一样评分。默认分数为 0.3。\n"
-            f"   - 1.0 (极罕见): 仅限【永久性】的核心事实（如：改名、确诊绝症、结婚、亲人离世）。\n"
-            f"   - 0.8 (少见): 强烈的个人偏好或长期习惯（如：绝对不吃香菜、坚持每天晨跑、核心价值观改变）。\n"
-            f"   - 0.5 (普通): 当天发生的具体事件（如：看了一部电影、去了一家餐厅、讨论了一个新闻）。大部分有内容的对话应在此档。\n"
-            f"   - 0.1 - 0.3 (默认分数): 闲聊、情绪发泄、日常问候、没有信息增量的互动。\n"
-            f"   【注意】：不要因为情绪激动就给高分，除非这揭示了新的性格特质。\n\n"
-            f"4. \"unresolved\": 默认为false。\n\n"
-            f"5. \"important_memory\": 默认为 null。只有当这段对话里出现【真正值得长期保存】的单个事实时，才输出一个对象；否则必须输出 null。\n"
-            f"   长期重要的门槛非常高：一年后仍会影响你如何陪伴/回应{user_name}，或属于稳定偏好/雷区、关系或人物事实变化、明确长期承诺、健康安全、重大人生事件、核心价值观变化、长期项目关键决定。\n"
-            f"   以下绝对不要放入 important_memory：普通日常、吃喝玩乐流水账、临时调试/操作、短暂情绪、重复撒娇、普通计划、一次性闲聊、只适合写进 summary 的当天事件。\n"
-            f"   如果输出对象，格式为 {{\"content\":\"一条原子长期记忆\", \"keywords\":[\"词1\"], \"importance\":0.75-1.0, \"source_message_ids\":[\"private:...\"], \"evidence\":\"一句话概括支持证据\", \"unresolved\":false}}。\n"
-            f"   每段最多 1 条 important_memory，宁可 null，不要凑数；importance 低于 0.75 的不能作为长期重要。\n\n"
-            f"严格只输出一个 JSON 对象，不要输出任何其他内容。\n\n"
-            f"【一段对话记录】：\n{messages_text}"
+        prompt = _atomic_digest_prompt(
+            actor_name=ai_name,
+            user_name=user_name,
+            persona_block=persona_block,
+            messages_text=messages_text,
+            ai_name=ai_name,
+            companion_name=connor_name,
         )
 
         # 用核心模型调用
         ai_messages = [{"role": "user", "content": prompt}]
         try:
-            raw_text = await simple_ai_call(ai_messages, model_key)
+            raw_text = await simple_ai_call(ai_messages, model_key, trace_label="memory_digest_summary")
         except Exception as e:
             print(f"[digest] 核心模型调用失败: {e}")
-            continue
+            model_failure_detected = True
+            break
 
         result = _parse_json_response(raw_text)
         if not result:
             print(f"[digest] JSON 解析失败: {raw_text[:200]}")
-            continue
+            model_failure_detected = True
+            break
 
-        summary = result.get("summary", "").strip()
-        keywords = result.get("keywords", [])
-        importance = float(result.get("importance", 0.5))
-        unresolved = 1 if result.get("unresolved", False) else 0
-        if isinstance(keywords, str):
-            keywords = [k.strip() for k in keywords.replace("、", ",").split(",") if k.strip()]
-
-        if not summary or len(summary) < 4:
-            continue
-
-        # embedding 向量化
-        vec = await get_embedding(summary)
-        if not vec:
-            continue
-
-        # 记录该组消息的时间范围，用于追溯原文
-        source_start_ts = group[0]["created_at"]
-        source_end_ts = group[-1]["created_at"]
-
-        mem_id = f"mem_{int(time.time()*1000)}_{hash(summary) % 10000}"
+        memory_items = _normalize_digest_memory_items(result, group)
         now = time.time()
-        keywords_json = json.dumps(keywords, ensure_ascii=False)
-
-        async with get_db() as db:
-            await db.execute(
-                "INSERT INTO memories (id, content, type, created_at, source_conv, embedding, keywords, importance, source_start_ts, source_end_ts, unresolved) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (mem_id, summary, "digest", now, None, _pack_embedding(vec), keywords_json, importance, source_start_ts, source_end_ts, unresolved)
+        group_created = 0
+        group_failed = False
+        for item in memory_items:
+            vec = await get_embedding(item["content"])
+            emb_blob = _pack_embedding(vec) if vec else None
+            mem_id = f"mem_{int(time.time()*1000)}_{abs(hash(item['content'])) % 10000}"
+            keywords_json = json.dumps(item["keywords"], ensure_ascii=False)
+            source_json = (
+                json.dumps(item["source_message_ids"], ensure_ascii=False)
+                if item["source_message_ids"] else None
             )
-            await db.commit()
-
-        await manager.broadcast({"type": "memory_added", "data": {
-            "id": mem_id, "content": summary, "type": "digest",
-            "created_at": now, "keywords": keywords_json, "importance": importance,
-            "source_start_ts": source_start_ts, "source_end_ts": source_end_ts,
-            "unresolved": unresolved,
-            "memory_kind": memory_kind_for_type("digest"),
-            "memory_kind_label": memory_kind_label("digest"),
-        }})
-        total_new += 1
-
-        # 每成功处理一组，才推进锚点到该组最后一条消息
-        save_digest_anchor(source_end_ts)
-        all_summaries.append(summary)
-
-        important = result.get("important_memory")
-        if isinstance(important, dict):
-            important_summary = str(important.get("content") or "").strip()
             try:
-                important_score = float(important.get("importance", 0.0))
-            except Exception:
-                important_score = 0.0
-            if important_summary and important_score >= 0.75:
-                important_keywords = important.get("keywords", [])
-                if isinstance(important_keywords, str):
-                    important_keywords = [
-                        k.strip() for k in important_keywords.replace("、", ",").split(",") if k.strip()
-                    ]
-                source_by_id = {
-                    str(m.get("_source_id")): m
-                    for m in group
-                    if str(m.get("_source_id") or "").strip()
-                }
-                important_source_ids = [
-                    str(x).strip()
-                    for x in _json_list(important.get("source_message_ids"))
-                    if str(x).strip() in source_by_id
-                ][:3]
-                if not important_source_ids:
-                    continue
-                source_rows = [source_by_id[source_id] for source_id in important_source_ids]
-                important_source_start = min((m["created_at"] for m in source_rows), default=source_start_ts)
-                important_source_end = max((m["created_at"] for m in source_rows), default=source_end_ts)
-                important_vec = await get_embedding(important_summary)
-                if important_vec:
-                    important_id = f"mem_{int(time.time()*1000)}_{hash(important_summary) % 10000}"
-                    important_keywords_json = json.dumps(important_keywords, ensure_ascii=False)
-                    important_source_json = (
-                        json.dumps(important_source_ids, ensure_ascii=False) if important_source_ids else None
+                async with get_db() as db:
+                    await db.execute(
+                        "INSERT INTO memories ("
+                        "id, content, type, created_at, source_conv, embedding, keywords, importance, "
+                        "source_start_ts, source_end_ts, unresolved, source_msg_id, evidence_summary, evidence_detail_level"
+                        ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            mem_id, item["content"], item["memory_type"], now, None,
+                            emb_blob, keywords_json, item["importance"],
+                            item["source_start_ts"], item["source_end_ts"], item["unresolved"],
+                            source_json, item["evidence_summary"], "summary",
+                        ),
                     )
-                    important_unresolved = 1 if important.get("unresolved", False) else 0
-                    async with get_db() as db:
-                        await db.execute(
-                            "INSERT INTO memories ("
-                            "id, content, type, created_at, source_conv, embedding, keywords, importance, "
-                            "source_start_ts, source_end_ts, unresolved, source_msg_id"
-                            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                            (
-                                important_id, important_summary, LONG_TERM_MEMORY_TYPE, now, None,
-                                _pack_embedding(important_vec), important_keywords_json,
-                                max(0.75, min(1.0, important_score)), important_source_start,
-                                important_source_end, important_unresolved, important_source_json,
-                            ),
-                        )
-                        await db.commit()
-                    await manager.broadcast({"type": "memory_added", "data": {
-                        "id": important_id, "content": important_summary, "type": LONG_TERM_MEMORY_TYPE,
-                        "created_at": now, "keywords": important_keywords_json,
-                        "importance": max(0.75, min(1.0, important_score)),
-                        "source_start_ts": important_source_start,
-                        "source_end_ts": important_source_end,
-                        "unresolved": important_unresolved,
-                        "source_msg_id": important_source_json,
-                        "memory_kind": memory_kind_for_type(LONG_TERM_MEMORY_TYPE),
-                        "memory_kind_label": memory_kind_label(LONG_TERM_MEMORY_TYPE),
-                    }})
-                    total_new += 1
+                    await db.commit()
+            except Exception as e:
+                print(f"[digest] 记忆写入失败，保留锚点等待重试: {type(e).__name__}: {e}")
+                group_failed = True
+                break
+            broadcast_mem = {
+                "id": mem_id,
+                "content": item["content"],
+                "type": item["memory_type"],
+                "created_at": now,
+                "keywords": keywords_json,
+                "importance": item["importance"],
+                "source_start_ts": item["source_start_ts"],
+                "source_end_ts": item["source_end_ts"],
+                "unresolved": item["unresolved"],
+                "source_msg_id": source_json,
+                "evidence_summary": item["evidence_summary"],
+                "evidence_detail_level": "summary",
+                "memory_kind": memory_kind_for_type(item["memory_type"]),
+                "memory_kind_label": memory_kind_label(item["memory_type"]),
+            }
+            broadcast_mem.update(_memory_time_payload(broadcast_mem))
+            broadcast_mem["source_count"] = len(item["source_message_ids"])
+            total_new += 1
+            group_created += 1
+            all_summaries.append(item["content"])
+            try:
+                await manager.broadcast({"type": "memory_added", "data": broadcast_mem})
+            except Exception as e:
+                print(f"[digest] 记忆广播失败，不影响写入: {type(e).__name__}: {e}")
+            await asyncio.sleep(0.001)
+
+        if group_failed:
+            digest_incomplete = True
+            break
+        if group_created > 0:
+            try:
+                save_digest_anchor(group[-1]["created_at"])
+            except Exception as e:
+                print(f"[digest] 锚点保存失败，保留待重试: {type(e).__name__}: {e}")
+                digest_incomplete = True
+                break
+        else:
+            print(f"[digest] 组 {group_start} ~ {group_end} 无可写入原子记忆")
+            digest_incomplete = True
+            break
 
     # ── 全部总结完成后，生成日记；可选发布朋友圈 ──
     context_msgs = []
-    if total_new > 0 and all_summaries:
+    diary_generation = {
+        "ok": False,
+        "attempts": [],
+        "model": "",
+        "fallback_used": False,
+        "diary_saved": False,
+        "moment_published": False,
+        "message": "本轮没有新记忆，不生成日记",
+    }
+    if model_failure_detected:
+        diary_generation["message"] = "记忆总结模型调用失败，本轮已熔断后续模型调用"
+    elif digest_incomplete:
+        diary_generation["message"] = "记忆总结未完整完成，本轮不生成日记"
+    elif total_new > 0 and all_summaries:
         try:
             # 使用本轮已合并排序的新消息，避免把总结产物或旧私聊尾巴重新喂给模型。
             context_msgs = [
@@ -939,29 +1403,51 @@ async def _do_digest(min_messages: int = 0, allow_ai_wishes: bool = False) -> di
                 for m in new_msgs[-30:]
                 if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()
             ]
+            connor_name = _connor_display_name()
+            context_lines = []
+            for m in new_msgs[-30:]:
+                content = (m.get("content") or "").strip()
+                if not content:
+                    continue
+                ts = datetime.fromtimestamp(m["created_at"]).strftime("%m-%d %H:%M")
+                src = m.get("_source", "private")
+                if src == "group":
+                    name = {"user": user_name, "aion": ai_name, "connor": connor_name}.get(m.get("sender"), m.get("sender", ""))
+                else:
+                    name = user_name if m.get("role") == "user" else ai_name
+                source_label = "群聊" if src == "group" else "私聊"
+                context_lines.append(f"[{ts}][{source_label}] {name}: {content[:300]}")
+            context_text = "\n".join(context_lines)
             summaries_text = "\n".join(f"- {s}" for s in all_summaries)
+            time_str = datetime.now().strftime("%Y年%m月%d日 %A %H:%M:%S")
             diary_prompt = (
                 f"{persona_block}"
+                f"当前时间：{time_str}\n\n"
                 f"你是{ai_name}。你刚刚整理了和{user_name}今天的聊天记忆，以下是你整理出的摘要：\n"
                 f"{summaries_text}\n\n"
+                f"【最近上下文】\n{context_text}\n\n"
                 f"请从你自己的视角写一篇私密日记，不是写给{user_name}看的聊天消息。"
                 f"日记可以记录你对这段记忆的感想，只写值得记录或有感触的事，不用每件事都提起，不要记流水账。语气必须符合你的人设。"
-                f"你可以自行决定是否发布一次朋友圈，吐槽或者感慨，或者用朋友圈隔空向对方喊话。\n\n"
+                f"你可以自行决定是否发布一次朋友圈，朋友圈不用每次都发，有想吐槽或者感慨，或者搞笑的事情，或者用朋友圈隔空向对方喊话。\n"
+                f"moment.expect_reply 表示发布朋友圈后是否希望另一个角色主动评论：true=希望对方回复，false=只发布、不触发回复；请根据朋友圈内容和你当下是否想与对方互动自行决定。\n"
+                f"你可以自行决定是否给{user_name}送一份图片小礼物。送礼应是更低概率的特殊事件，只在特殊日子，或聊天中确实有特别温馨、感动、有意义、值得纪念的内容时才送；不要为了完成任务而送礼，也不要用礼物重复日记或朋友圈已经表达的普通感想。\n"
+                f"givegift 为 true 时，gift.image_prompt 填写英文生图提示词，gift.message 填写符合你人设、自然真挚的赠言；为 false 时两项留空。\n\n"
                 f"严格只输出 JSON，不要输出 Markdown，不要解释：\n"
                 f"{{\n"
                 f"  \"diary\": {{\"title\": \"日记标题\", \"content\": \"日记正文\", \"mood\": \"此刻心情\"}},\n"
                 f"  \"post_moment\": false,\n"
-                f"  \"moment\": {{\"content\": \"朋友圈内容，post_moment 为 false 时留空\", \"expect_reply\": false}}\n"
+                f"  \"moment\": {{\"content\": \"朋友圈内容，post_moment 为 false 时留空\", \"expect_reply\": false}},\n"
+                f"  \"givegift\": false,\n"
+                f"  \"gift\": {{\"image_prompt\": \"英文生图提示词，givegift 为 false 时留空\", \"message\": \"赠言，givegift 为 false 时留空\"}}\n"
                 f"}}"
             )
             diary_messages = context_msgs + [{"role": "user", "content": diary_prompt}]
-            diary_text = await simple_ai_call(diary_messages, model_key)
+            diary_data, diary_generation = await _generate_digest_diary(diary_messages, model_key)
 
-            from diary import normalize_diary_payload, parse_diary_payload, publish_ai_moment, save_diary_entry
-            diary_data = parse_diary_payload(diary_text)
+            from diary import normalize_diary_payload, publish_ai_moment, save_diary_entry
             if diary_data:
                 diary_entry, moment_entry = normalize_diary_payload(diary_data)
-                await save_diary_entry(
+                saved_diary = await save_diary_entry(
                     author="aion",
                     title=diary_entry.get("title", ""),
                     content=diary_entry.get("content", ""),
@@ -971,45 +1457,38 @@ async def _do_digest(min_messages: int = 0, allow_ai_wishes: bool = False) -> di
                     source_start_ts=new_msgs[0]["created_at"],
                     source_end_ts=new_msgs[-1]["created_at"],
                 )
+                diary_generation["diary_saved"] = bool(saved_diary)
                 if moment_entry and moment_entry.get("content"):
-                    await publish_ai_moment(
+                    published_moment = await publish_ai_moment(
                         author="aion",
                         content=moment_entry.get("content", ""),
                         expect_reply=bool(moment_entry.get("expect_reply")),
                         source_conv=conv_id,
                         source_msg_id=None,
                     )
+                    diary_generation["moment_published"] = bool(published_moment)
+                try:
+                    from gift import send_gift_from_decision
+                    await send_gift_from_decision(diary_data, sender="aion")
+                except Exception as e:
+                    print(f"[digest] 执行送礼决定失败: {e}")
+                diary_generation["message"] = "日记已生成" + (
+                    "，并发布了朋友圈" if diary_generation["moment_published"] else "，本次未选择发布朋友圈"
+                )
         except Exception as e:
             print(f"[digest] 生成日记失败: {e}")
+            diary_generation = {
+                **diary_generation,
+                "ok": False,
+                "diary_saved": False,
+                "moment_published": False,
+                "message": f"日记保存阶段失败：{type(e).__name__}",
+            }
 
-    # ── 礼物判断：总结完成后让 AI 决定是否送礼 ──
-    if conv_id and total_new > 0 and all_summaries:
-        try:
-            # 复用已有的上下文（若上面感慨部分已获取）或重新获取
-            if not context_msgs:
-                async with get_db() as db:
-                    db.row_factory = aiosqlite.Row
-                    cur = await db.execute(
-                        "SELECT role, content FROM messages "
-                        "WHERE conv_id=? AND role IN ('user','assistant') "
-                        "ORDER BY created_at DESC LIMIT 30",
-                        (conv_id,)
-                    )
-                    recent_rows = list(reversed(await cur.fetchall()))
-                context_msgs = [
-                    {"role": r["role"], "content": r["content"][:300]}
-                    for r in recent_rows
-                ]
-            from gift import judge_and_send_gift
-            await judge_and_send_gift(
-                all_summaries, context_msgs, persona_block,
-                ai_name, user_name, model_key, conv_id,
-            )
-        except Exception as e:
-            print(f"[digest] 礼物判断失败: {e}")
+    followup_model_calls_allowed = bool(diary_generation.get("ok"))
 
     ai_wish_created = False
-    if allow_ai_wishes and total_new > 0 and all_summaries:
+    if allow_ai_wishes and total_new > 0 and all_summaries and followup_model_calls_allowed and not digest_incomplete:
         try:
             if not context_msgs:
                 context_msgs = [
@@ -1023,7 +1502,11 @@ async def _do_digest(min_messages: int = 0, allow_ai_wishes: bool = False) -> di
             )
 
             async def _generate_wish_text(prompt: str):
-                return await simple_ai_call([{"role": "user", "content": prompt}], model_key)
+                return await simple_ai_call(
+                    [{"role": "user", "content": prompt}],
+                    model_key,
+                    trace_label="memory_digest_wish",
+                )
 
             from wish_pool import maybe_create_ai_digest_wish
 
@@ -1045,12 +1528,20 @@ async def _do_digest(min_messages: int = 0, allow_ai_wishes: bool = False) -> di
         except Exception as e:
             print(f"[digest] wish decision failed: {e}")
 
+    result_message = f"总结完成：处理了 {len(new_msgs)} 条消息（{len(groups)} 组），生成了 {total_new} 条新记忆"
+    if total_new > 0:
+        result_message += f"；{diary_generation.get('message') or '日记阶段状态未知'}"
+    if model_failure_detected:
+        result_message += "；记忆总结模型调用失败，锚点停在最后成功写入的分组，可稍后继续重试"
+    if digest_incomplete:
+        result_message += "；部分消息未完成，锚点停在最后成功写入的分组，可稍后继续重试"
     return {
         "ok": True,
-        "message": f"总结完成：处理了 {len(new_msgs)} 条消息（{len(groups)} 组），生成了 {total_new} 条新记忆",
+        "message": result_message,
         "new_memories_count": total_new,
         "processed_messages": len(new_msgs),
         "ai_wish_created": ai_wish_created,
+        "diary_generation": diary_generation,
     }
 
 
@@ -1069,6 +1560,14 @@ async def _ensure_daily_compression_schema():
         for table in ("memories", "chatroom_memories"):
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN compression_stage INTEGER DEFAULT 0")
+            except Exception:
+                pass
+            try:
+                await db.execute(f"ALTER TABLE {table} ADD COLUMN evidence_summary TEXT DEFAULT ''")
+            except Exception:
+                pass
+            try:
+                await db.execute(f"ALTER TABLE {table} ADD COLUMN evidence_detail_level TEXT DEFAULT 'summary'")
             except Exception:
                 pass
         try:
@@ -1171,6 +1670,42 @@ def _valid_source_ids(value, by_id: dict[str, dict], limit: int = 20) -> list[st
     return ids
 
 
+def _daily_compress_policy_text(tier: dict | None) -> str:
+    key = (tier or {}).get("key") or "recent"
+    if key == "recent":
+        return (
+            "当前档位：15-90 天，近期轻整理。\n"
+            "这部分仍然属于近期陪伴记忆，不是档案清理。目标是去重、合并同一件事的连续记录、修剪明显无意义噪音。\n"
+            "保留具体人名、物品、项目、情绪转折、承诺、共同经历、阶段性进展，以及以后聊天会自然用到的细节。\n"
+            "除非输入只是明显重复、空泛寒暄、临时错误日志、一次性无后续状态，否则不要放入 discard_memory_ids。\n"
+            "允许每 1-3 天保留多条日常；不要为了压缩率把一周压成一条。近期记忆宁可多保留，也不要过度精简。\n"
+            "如果候选内容都有陪伴价值，discard_memory_ids 可以很少，甚至为空。\n"
+        )
+    if key == "mid":
+        return (
+            "当前档位：90-180 天，中期整理。\n"
+            "目标是把几个月前的日常整理成主题和阶段脉络，而不是只剩一句话。\n"
+            "按生活、关系、项目、健康、兴趣、反复出现的偏好/雷区来合并；每 1-2 周可以保留 1-3 条有内容的日常印象。\n"
+            "删除临时状态、重复情绪、已失效的短计划和纯调试过程；保留能说明那段时间怎么生活、在意什么、关系如何变化的内容。\n"
+            "长期重要事实可以提炼为 important_memories，但仍然要严格，不要把普通开心或普通聊天升级为长期重要。\n"
+        )
+    if key == "long":
+        return (
+            "当前档位：180-365 天，远期归档。\n"
+            "目标是明显压缩，只保留长期仍有帮助的生活模式、关系事实变化、健康安全、稳定偏好/雷区、长期项目节点和重要承诺。\n"
+            "普通日常氛围、当天吃喝玩乐、短暂情绪、已完成的小任务通常应丢弃，除非它们标志了关系或人生阶段变化。\n"
+            "compressed_daily 应该偏少，按月或大主题保存；important_memories 只保存一年后仍会影响回应方式的事实。\n"
+            "不要保留原文式细节，不要声称逐字记得当时对话。\n"
+        )
+    return (
+        "当前档位：365 天以上，事实档案。\n"
+        "默认不生成普通 compressed_daily；只有在一个长期稳定模式非常重要、但又不是单一事实时，才允许极少量 daily。\n"
+        "主要任务是提取重大事实：关系建立/结束/复合，重要人物或宠物的离开与加入，搬家、疾病、健康安全、家庭变化、长期承诺、核心身份变化、重大项目节点、长期偏好/雷区。\n"
+        "普通日常、普通情绪、一次性的吃喝玩乐、普通陪伴氛围、临时计划都应丢弃。\n"
+        "important_memories 必须是事实性、原子化、可在一年后仍明确影响回应方式的内容；没有这种事实就不要硬凑。\n"
+    )
+
+
 def _daily_compress_prompt(
     *,
     actor_name: str,
@@ -1178,33 +1713,38 @@ def _daily_compress_prompt(
     persona_block: str,
     rows: list[dict],
     date_label: str,
+    tier: dict | None = None,
 ) -> str:
+    tier_label = (tier or {}).get("label") or "15-90d 近期轻整理"
+    max_important = int((tier or {}).get("max_important") or 2)
     return (
         f"{persona_block}"
         f"你是{actor_name}，请以{user_name}的爱人身份整理自己的日常记忆。"
-        "这不是冷冰冰的归档，而是把两周前的日常流水账压缩成更模糊、更自然的印象。\n\n"
+        "这不是冷冰冰的归档，而是按时间远近整理记忆：越近越完整，越远越事实化。\n\n"
         "你只处理【日常记忆】，不要回看原文，也不要声称记得逐字细节。"
-        "目标是减少噪音：普通寒暄、重复情绪、临时调试步骤、一次性状态可以丢弃；"
-        "保留阶段性的主题、反复出现的生活/项目脉络、能帮助以后自然陪伴的模糊印象。\n\n"
+        "目标是减少噪音，同时保留以后陪伴时真正有用的生活、关系、项目和情绪脉络。\n\n"
+        f"{_daily_compress_policy_text(tier)}\n"
         "如果日常记忆里藏着真正长期重要的事实，可以额外放入 important_memories，但门槛极高："
         "必须是一年后仍会影响回应方式的稳定偏好/雷区、关系或人物事实变化、明确长期承诺、健康安全、重大人生事件、核心价值观变化、长期项目关键决定。"
         "普通当天事件、吃喝玩乐、短暂情绪、临时计划绝对不能放进去。\n\n"
         "严格只输出 JSON，不要 Markdown，不要解释。格式：\n"
         "{\n"
         "  \"compressed_daily\": [\n"
-        "    {\"content\":\"一条模糊日常印象\", \"source_memory_ids\":[\"mem_...\"], \"keywords\":[\"词\"], \"importance\":0.2, \"memory_time\":\"YYYY-MM-DD\", \"reason\":\"为什么这样压缩\"}\n"
+        "    {\"content\":\"2026-06-16，一条模糊日常印象\", \"source_memory_ids\":[\"mem_...\"], \"keywords\":[\"词\"], \"importance\":0.2, \"memory_time\":\"YYYY-MM-DD\", \"reason\":\"为什么这样压缩\"}\n"
         "  ],\n"
         "  \"important_memories\": [\n"
-        "    {\"content\":\"一条原子长期重要记忆\", \"source_memory_ids\":[\"mem_...\"], \"keywords\":[\"词\"], \"importance\":0.8, \"memory_time\":\"YYYY-MM-DD\", \"reason\":\"为什么值得长期保存\"}\n"
+        "    {\"content\":\"2026-06-16，一条原子长期重要记忆\", \"source_memory_ids\":[\"mem_...\"], \"keywords\":[\"词\"], \"importance\":0.8, \"memory_time\":\"YYYY-MM-DD\", \"reason\":\"为什么值得长期保存\"}\n"
         "  ],\n"
         "  \"discard_memory_ids\": [\"mem_...\"],\n"
         "  \"message\": \"用第一人称说一小段这次压缩后的感受，像整理旧记忆后想对爱人说的话\"\n"
         "}\n\n"
         "要求：\n"
-        "1. compressed_daily 每 1-7 天最多 1 条，允许 0 条，不要凑数。\n"
-        "2. important_memories 最多 2 条，importance 必须 >= 0.8，且必须引用 source_memory_ids。\n"
-        "3. 每个输入 id 如果没有保留价值，就放入 discard_memory_ids；如果被压缩或提炼为重要记忆，就放进对应 source_memory_ids。\n"
-        "4. 不要制造输入里没有的新事实。\n\n"
+        "1. compressed_daily 的数量必须服从当前档位策略；近期轻整理不要过度精简，事实档案不要硬凑普通日常。\n"
+        f"2. important_memories 最多 {max_important} 条，importance 必须 >= 0.8，且必须引用 source_memory_ids。\n"
+        "3. 每个输入 id 如果没有保留价值，才放入 discard_memory_ids；如果被压缩或提炼为重要记忆，就放进对应 source_memory_ids。\n"
+        "4. 不要制造输入里没有的新事实。\n"
+        "5. 不要输出“近期记录/昨天前天做了什么”这类聚合流水账；没有保留价值就丢弃。\n\n"
+        f"压缩档位：{tier_label}\n"
         f"压缩时间窗：{date_label}\n"
         "待压缩日常记忆：\n"
         f"{_format_daily_rows_for_prompt(rows)}"
@@ -1231,6 +1771,8 @@ async def _insert_main_compressed_memory(
     source_rows: list[dict],
     memory_time: float,
     compression_stage: int,
+    source_msg_ids: list[str] | None = None,
+    evidence_summary: str = "",
 ) -> str | None:
     if not content.strip():
         return None
@@ -1242,12 +1784,15 @@ async def _insert_main_compressed_memory(
         await db.execute(
             "INSERT INTO memories ("
             "id, content, type, created_at, source_conv, embedding, keywords, importance, "
-            "source_start_ts, source_end_ts, unresolved, source_msg_id, compression_stage"
-            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "source_start_ts, source_end_ts, unresolved, source_msg_id, compression_stage, "
+            "evidence_summary, evidence_detail_level"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                mem_id, content, memory_type, memory_time, "daily_memory_compress_14d",
+                mem_id, content, memory_type, memory_time, "daily_memory_compress_progressive",
                 _pack_embedding(vec) if vec else None, json.dumps(keywords, ensure_ascii=False),
-                importance, source_start, source_end, 0, "[]", compression_stage,
+                importance, source_start, source_end, 0,
+                json.dumps(source_msg_ids or [], ensure_ascii=False), compression_stage,
+                _clean_evidence_summary(evidence_summary), "summary",
             ),
         )
         await db.commit()
@@ -1263,6 +1808,7 @@ def _daily_review_id() -> str:
 
 
 def _review_old_row(row: dict, store: str) -> dict:
+    stage = int(row.get("compression_stage") or 0)
     return {
         "id": row.get("id"),
         "store": store,
@@ -1273,7 +1819,70 @@ def _review_old_row(row: dict, store: str) -> dict:
         "source_start_ts": row.get("source_start_ts"),
         "source_end_ts": row.get("source_end_ts"),
         "type": row.get("type") or row.get("memory_kind") or "",
+        "compression_stage": stage,
     }
+
+
+def _daily_row_age_days(row: dict, now_ts: float | None = None) -> float:
+    now_ts = now_ts or time.time()
+    return max(0.0, (now_ts - _memory_event_ts(row)) / 86400)
+
+
+def _daily_tier_for_row(row: dict, now_ts: float | None = None) -> dict | None:
+    stage = int(row.get("compression_stage") or 0)
+    age_days = _daily_row_age_days(row, now_ts)
+    for tier in DAILY_COMPRESSION_TIERS:
+        if stage not in tier["source_stages"]:
+            continue
+        if age_days < tier["min_days"]:
+            continue
+        if tier["max_days"] is not None and age_days >= tier["max_days"]:
+            continue
+        return tier
+    return None
+
+
+def _daily_tier_rows(rows: list[dict], now_ts: float | None = None) -> dict[str, list[dict]]:
+    grouped = {tier["key"]: [] for tier in DAILY_COMPRESSION_TIERS}
+    for row in rows:
+        tier = _daily_tier_for_row(row, now_ts)
+        if tier:
+            row["compression_tier"] = tier["key"]
+            row["target_compression_stage"] = tier["output_stage"]
+            row["retain_source_detail"] = bool(tier.get("retain_source_detail", False))
+            grouped[tier["key"]].append(row)
+    return grouped
+
+
+def _source_msg_ids_from_rows(rows: list[dict], retain_source_detail: bool) -> list[str]:
+    if not retain_source_detail:
+        return []
+    result, seen = [], set()
+    for row in rows:
+        source_conv = row.get("source_conv") or ""
+        for raw in _json_list(row.get("source_msg_id")):
+            source_id = str(raw).strip()
+            if not source_id:
+                continue
+            if ":" not in source_id:
+                prefix = "chatroom" if str(source_conv).startswith("chatroom:") else "private"
+                source_id = f"{prefix}:{source_id}"
+            if source_id not in seen:
+                seen.add(source_id)
+                result.append(source_id)
+    return result[:80]
+
+
+def _draft_item_source_msg_ids(item: dict) -> list[str]:
+    return [str(x).strip() for x in _json_list(item.get("source_msg_ids")) if str(x).strip()]
+
+
+def _draft_item_evidence_summary(item: dict) -> str:
+    text = str(item.get("evidence_summary") or item.get("reason") or "").strip()
+    if text:
+        return text
+    source_count = len(_json_list(item.get("source_memory_ids")))
+    return f"Compressed from {source_count} daily memory items." if source_count else ""
 
 
 def _source_bounds(source_rows: list[dict], fallback_ts: float) -> tuple[float, float]:
@@ -1299,6 +1908,8 @@ def _normalize_daily_draft_item(
     memory_kind: str,
     source_limit: int,
     default_importance: float,
+    compression_stage: int = 1,
+    retain_source_detail: bool = True,
 ) -> dict | None:
     if not isinstance(item, dict):
         return None
@@ -1309,6 +1920,9 @@ def _normalize_daily_draft_item(
     if not source_ids:
         return None
     source_rows = [by_id[mem_id] for mem_id in source_ids]
+    retain_source_detail = bool(retain_source_detail and all(
+        bool(row.get("retain_source_detail", True)) for row in source_rows
+    ))
     fallback_ts = min(_memory_event_ts(row) for row in source_rows)
     source_start, source_end = _source_bounds(source_rows, fallback_ts)
     try:
@@ -1321,18 +1935,27 @@ def _normalize_daily_draft_item(
         importance = min(1.0, raw_importance)
     else:
         importance = max(0.0, min(0.6, raw_importance))
+    memory_time = _parse_memory_time(item.get("memory_time"), fallback_ts)
+    content = _prefix_memory_content_date(content, memory_time)
+    date_keyword = _date_prefix_for_ts(memory_time)
+    keywords = _normalize_daily_keywords(item.get("keywords"))
+    if date_keyword not in keywords:
+        keywords = [date_keyword] + keywords
     return {
         "content": content,
         "source_memory_ids": source_ids,
-        "keywords": _normalize_daily_keywords(item.get("keywords")),
+        "keywords": keywords[:8],
         "importance": importance,
-        "memory_time": _parse_memory_time(item.get("memory_time"), fallback_ts),
+        "memory_time": memory_time,
         "source_start_ts": source_start,
         "source_end_ts": source_end,
         "reason": str(item.get("reason") or "").strip(),
         "memory_kind": memory_kind,
         "memory_type": LONG_TERM_MEMORY_TYPE if memory_kind == "long_term" else "daily",
-        "compression_stage": 0 if memory_kind == "long_term" else 1,
+        "compression_stage": 0 if memory_kind == "long_term" else compression_stage,
+        "retain_source_detail": retain_source_detail,
+        "source_msg_ids": _source_msg_ids_from_rows(source_rows, retain_source_detail),
+        "evidence_summary": _clean_evidence_summary(item.get("evidence_summary") or item.get("reason") or content),
     }
 
 
@@ -1344,7 +1967,7 @@ def _chatroom_target_for_rows(source_rows: list[dict], fallback_room: str, fallb
     return room_id, scope
 
 
-async def _draft_main_daily_rows(rows: list[dict], model_key: str) -> dict:
+async def _draft_main_daily_rows(rows: list[dict], model_key: str, tier: dict | None = None) -> dict:
     wb = load_worldbook()
     user_name = wb.get("user_name") or "用户"
     ai_name = wb.get("ai_name") or "AI"
@@ -1360,7 +1983,9 @@ async def _draft_main_daily_rows(rows: list[dict], model_key: str) -> dict:
         persona_block=persona_block,
         rows=rows,
         date_label=_date_range_label(rows),
+        tier=tier,
     )
+    tier = tier or DAILY_COMPRESSION_TIERS[0]
     parsed, raw = await _call_daily_compress_model("aion", prompt, model_key)
     if not parsed:
         return {
@@ -1374,20 +1999,25 @@ async def _draft_main_daily_rows(rows: list[dict], model_key: str) -> dict:
             "covered_ids": [],
             "message": "",
             "raw_response": raw,
+            "compression_tier": tier["key"],
+            "output_stage": tier["output_stage"],
         }
 
     compressed_daily, important_memories = [], []
+    retain_source_detail = bool(tier.get("retain_source_detail", False))
     covered = set(_valid_source_ids(parsed.get("discard_memory_ids"), by_id, limit=len(rows)))
     for item in parsed.get("compressed_daily") or []:
         normalized = _normalize_daily_draft_item(
-            item, by_id=by_id, memory_kind="daily", source_limit=30, default_importance=0.25
+            item, by_id=by_id, memory_kind="daily", source_limit=30, default_importance=0.25,
+            compression_stage=tier["output_stage"], retain_source_detail=retain_source_detail,
         )
         if normalized:
             compressed_daily.append(normalized)
             covered.update(normalized["source_memory_ids"])
     for item in parsed.get("important_memories") or []:
         normalized = _normalize_daily_draft_item(
-            item, by_id=by_id, memory_kind="long_term", source_limit=10, default_importance=0.0
+            item, by_id=by_id, memory_kind="long_term", source_limit=10, default_importance=0.0,
+            retain_source_detail=retain_source_detail,
         )
         if normalized:
             important_memories.append(normalized)
@@ -1399,16 +2029,20 @@ async def _draft_main_daily_rows(rows: list[dict], model_key: str) -> dict:
         "input_count": len(rows),
         "old_rows": [_review_old_row(row, "main") for row in rows],
         "compressed_daily": compressed_daily,
-        "important_memories": important_memories[:2],
+        "important_memories": important_memories[:int(tier.get("max_important") or 2)],
         "discard_memory_ids": sorted(_valid_source_ids(parsed.get("discard_memory_ids"), by_id, limit=len(rows))),
         "covered_ids": sorted(covered),
         "remaining": len(rows) - len(covered),
         "message": str(parsed.get("message") or "").strip(),
         "raw_response": raw,
+        "compression_tier": tier["key"],
+        "tier_label": tier["label"],
+        "output_stage": tier["output_stage"],
+        "retain_source_detail": retain_source_detail,
     }
 
 
-async def _draft_chatroom_daily_rows(rows: list[dict], model_key: str) -> dict:
+async def _draft_chatroom_daily_rows(rows: list[dict], model_key: str, tier: dict | None = None) -> dict:
     from chatroom import get_chatroom_names, load_chatroom_config, _read_connor_persona
     user_name, _, companion_name = get_chatroom_names()
     persona = _read_connor_persona()
@@ -1420,7 +2054,9 @@ async def _draft_chatroom_daily_rows(rows: list[dict], model_key: str) -> dict:
         persona_block=persona_block,
         rows=rows,
         date_label=_date_range_label(rows),
+        tier=tier,
     )
+    tier = tier or DAILY_COMPRESSION_TIERS[0]
     parsed, raw = await _call_daily_compress_model("connor", prompt, model_key or load_chatroom_config().get("connor_model") or "Codex")
     if not parsed:
         return {
@@ -1434,15 +2070,19 @@ async def _draft_chatroom_daily_rows(rows: list[dict], model_key: str) -> dict:
             "covered_ids": [],
             "message": "",
             "raw_response": raw,
+            "compression_tier": tier["key"],
+            "output_stage": tier["output_stage"],
         }
 
     default_room = rows[0].get("room_id") if rows else "connor_unified"
     default_scope = rows[0].get("scope") if rows else "connor"
     compressed_daily, important_memories = [], []
+    retain_source_detail = bool(tier.get("retain_source_detail", False))
     covered = set(_valid_source_ids(parsed.get("discard_memory_ids"), by_id, limit=len(rows)))
     for item in parsed.get("compressed_daily") or []:
         normalized = _normalize_daily_draft_item(
-            item, by_id=by_id, memory_kind="daily", source_limit=30, default_importance=0.25
+            item, by_id=by_id, memory_kind="daily", source_limit=30, default_importance=0.25,
+            compression_stage=tier["output_stage"], retain_source_detail=retain_source_detail,
         )
         if normalized:
             source_rows = [by_id[mem_id] for mem_id in normalized["source_memory_ids"]]
@@ -1451,7 +2091,8 @@ async def _draft_chatroom_daily_rows(rows: list[dict], model_key: str) -> dict:
             covered.update(normalized["source_memory_ids"])
     for item in parsed.get("important_memories") or []:
         normalized = _normalize_daily_draft_item(
-            item, by_id=by_id, memory_kind="long_term", source_limit=10, default_importance=0.0
+            item, by_id=by_id, memory_kind="long_term", source_limit=10, default_importance=0.0,
+            retain_source_detail=retain_source_detail,
         )
         if normalized:
             source_rows = [by_id[mem_id] for mem_id in normalized["source_memory_ids"]]
@@ -1465,12 +2106,16 @@ async def _draft_chatroom_daily_rows(rows: list[dict], model_key: str) -> dict:
         "input_count": len(rows),
         "old_rows": [_review_old_row(row, "chatroom") for row in rows],
         "compressed_daily": compressed_daily,
-        "important_memories": important_memories[:2],
+        "important_memories": important_memories[:int(tier.get("max_important") or 2)],
         "discard_memory_ids": sorted(_valid_source_ids(parsed.get("discard_memory_ids"), by_id, limit=len(rows))),
         "covered_ids": sorted(covered),
         "remaining": len(rows) - len(covered),
         "message": str(parsed.get("message") or "").strip(),
         "raw_response": raw,
+        "compression_tier": tier["key"],
+        "tier_label": tier["label"],
+        "output_stage": tier["output_stage"],
+        "retain_source_detail": retain_source_detail,
     }
 
 
@@ -1495,7 +2140,7 @@ def _daily_compression_counts(payload: dict) -> dict:
         covered = set()
         all_old_rows = []
         for batch in batches:
-            covered.update(batch.get("covered_ids") or [])
+            covered.update(_batch_covered_ids(batch))
             all_old_rows.extend(batch.get("old_rows") or [])
         old_rows = [row for row in all_old_rows if row.get("id") in covered]
         return {
@@ -1521,6 +2166,24 @@ def _daily_compression_counts(payload: dict) -> dict:
         "errors": main["errors"] + chatroom["errors"],
     }
     return {"main": main, "chatroom": chatroom, "total": total}
+
+
+def _batch_covered_ids(batch: dict) -> set[str]:
+    covered = set(str(x).strip() for x in _json_list(batch.get("discard_memory_ids")) if str(x).strip())
+    covered.update(str(x).strip() for x in _json_list(batch.get("covered_ids")) if str(x).strip())
+    for field in ("compressed_daily", "important_memories"):
+        for item in batch.get(field) or []:
+            covered.update(str(x).strip() for x in _json_list(item.get("source_memory_ids")) if str(x).strip())
+    old_ids = {str(row.get("id") or "").strip() for row in batch.get("old_rows") or []}
+    return {mem_id for mem_id in covered if mem_id and (not old_ids or mem_id in old_ids)}
+
+
+def _refresh_payload_covered_ids(payload: dict) -> dict:
+    for key in ("main", "chatroom"):
+        for batch in (payload.get(key) or {}).get("batches") or []:
+            batch["covered_ids"] = sorted(_batch_covered_ids(batch))
+            batch["remaining"] = max(0, int(batch.get("input_count", 0)) - len(batch["covered_ids"]))
+    return payload
 
 
 def _serialize_daily_compression_review(row) -> dict | None:
@@ -1568,11 +2231,12 @@ async def get_latest_daily_compression_review(target: str = "main") -> dict | No
     return _serialize_daily_compression_review(row)
 
 
-async def generate_daily_compression_draft(days: int = 14, target: str = "main") -> dict:
+async def generate_daily_compression_draft(days: int = 15, target: str = "main") -> dict:
     await _ensure_daily_compression_schema()
-    days = max(1, int(days or 14))
+    days = max(1, int(days or 15))
     target = _normalize_daily_compression_target(target)
-    cutoff_ts = time.time() - days * 86400
+    now_ts = time.time()
+    cutoff_ts = now_ts - days * 86400
     model_key, _ = await _get_active_model_and_conv()
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
@@ -1585,10 +2249,10 @@ async def generate_daily_compression_draft(days: int = 14, target: str = "main")
                 "SELECT id, content, type, created_at, source_conv, keywords, importance, "
                 "source_start_ts, source_end_ts, source_msg_id, compression_stage "
                 f"FROM memories WHERE LOWER(type) IN ({placeholders}) "
-                "AND COALESCE(compression_stage,0)=0 "
+                "AND COALESCE(compression_stage,0) < ? "
                 "AND COALESCE(source_end_ts, source_start_ts, created_at) < ? "
                 "ORDER BY COALESCE(source_start_ts, created_at) ASC",
-                (*daily_types, cutoff_ts),
+                (*daily_types, DAILY_COMPRESSION_FINAL_STAGE, cutoff_ts),
             )
             main_rows = [dict(row) for row in await cur.fetchall()]
         if target in {"chatroom", "both"}:
@@ -1596,13 +2260,17 @@ async def generate_daily_compression_draft(days: int = 14, target: str = "main")
                 "SELECT id, room_id, scope, content, keywords, importance, created_at, "
                 "source_start_ts, source_end_ts, source_msg_id, memory_kind, compression_stage "
                 "FROM chatroom_memories "
-                "WHERE memory_kind='daily' AND COALESCE(compression_stage,0)=0 "
+                "WHERE memory_kind='daily' AND COALESCE(compression_stage,0) < ? "
                 "AND COALESCE(source_end_ts, source_start_ts, created_at) < ? "
                 "ORDER BY COALESCE(source_start_ts, created_at) ASC",
-                (cutoff_ts,),
+                (DAILY_COMPRESSION_FINAL_STAGE, cutoff_ts),
             )
             chatroom_rows = [dict(row) for row in await cur.fetchall()]
 
+    main_by_tier = _daily_tier_rows(main_rows, now_ts)
+    chatroom_by_tier = _daily_tier_rows(chatroom_rows, now_ts)
+    main_rows = [row for rows in main_by_tier.values() for row in rows]
+    chatroom_rows = [row for rows in chatroom_by_tier.values() for row in rows]
     candidate_count = len(main_rows) + len(chatroom_rows)
     if candidate_count <= 0:
         return {
@@ -1613,15 +2281,24 @@ async def generate_daily_compression_draft(days: int = 14, target: str = "main")
         }
 
     payload = _empty_draft_payload(days, cutoff_ts, target)
-    for batch in _batch_daily_rows(main_rows):
-        payload["main"]["batches"].append(await _draft_main_daily_rows(batch, model_key))
+    payload["policy"] = "progressive"
+    payload["keep_source_days"] = DAILY_COMPRESSION_KEEP_SOURCE_DAYS
+    payload["tiers"] = [
+        {k: v for k, v in tier.items() if k != "source_stages"} | {"source_stages": sorted(tier["source_stages"])}
+        for tier in DAILY_COMPRESSION_TIERS
+    ]
+    for tier in DAILY_COMPRESSION_TIERS:
+        for batch in _batch_daily_rows(main_by_tier.get(tier["key"], [])):
+            payload["main"]["batches"].append(await _draft_main_daily_rows(batch, model_key, tier))
     chatroom_model = ""
     if chatroom_rows:
         from chatroom import load_chatroom_config
         chatroom_model = load_chatroom_config().get("connor_model") or "Codex"
-        for batch in _batch_daily_rows(chatroom_rows):
-            payload["chatroom"]["batches"].append(await _draft_chatroom_daily_rows(batch, chatroom_model))
+        for tier in DAILY_COMPRESSION_TIERS:
+            for batch in _batch_daily_rows(chatroom_by_tier.get(tier["key"], [])):
+                payload["chatroom"]["batches"].append(await _draft_chatroom_daily_rows(batch, chatroom_model, tier))
 
+    payload = _refresh_payload_covered_ids(payload)
     counts = _daily_compression_counts(payload)
     raw_response = "\n\n".join(
         batch.get("raw_response", "")
@@ -1668,6 +2345,31 @@ async def get_daily_compression_review(review_id: str) -> dict | None:
     return _serialize_daily_compression_review(row)
 
 
+async def update_daily_compression_review(review_id: str, payload: dict) -> dict:
+    await _ensure_daily_compression_schema()
+    review = await get_daily_compression_review(review_id)
+    if not review:
+        return {"ok": False, "message": "Compression draft not found."}
+    if review["status"] != "draft":
+        return {"ok": False, "message": "Only draft compression reviews can be edited.", "review": review}
+    if not isinstance(payload, dict):
+        return {"ok": False, "message": "Invalid draft payload.", "review": review}
+    payload.setdefault("target", review.get("target") or "main")
+    payload.setdefault("days", review.get("days") or 15)
+    payload = _refresh_payload_covered_ids(payload)
+    candidate_count = _daily_compression_counts(payload)["total"]["input_count"]
+    now = time.time()
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE daily_memory_compress_reviews "
+            "SET payload=?, candidate_count=?, updated_at=? WHERE id=?",
+            (json.dumps(payload, ensure_ascii=False), candidate_count, now, review_id),
+        )
+        await db.commit()
+    updated = await get_daily_compression_review(review_id)
+    return {"ok": True, "review": updated, "message": "Compression draft saved."}
+
+
 def _source_rows_from_draft_item(item: dict) -> list[dict]:
     fallback_ts = float(item.get("memory_time") or time.time())
     return [{
@@ -1686,8 +2388,8 @@ async def _delete_main_daily_ids(ids: set[str]) -> int:
     async with get_db() as db:
         cur = await db.execute(
             f"DELETE FROM memories WHERE id IN ({id_placeholders}) "
-            f"AND LOWER(type) IN ({type_placeholders}) AND COALESCE(compression_stage,0)=0",
-            (*sorted(ids), *daily_types),
+            f"AND LOWER(type) IN ({type_placeholders}) AND COALESCE(compression_stage,0)<?",
+            (*sorted(ids), *daily_types, DAILY_COMPRESSION_FINAL_STAGE),
         )
         await db.commit()
         return cur.rowcount if cur.rowcount is not None else 0
@@ -1700,8 +2402,8 @@ async def _delete_chatroom_daily_ids(ids: set[str]) -> int:
     async with get_db() as db:
         cur = await db.execute(
             f"DELETE FROM chatroom_memories WHERE id IN ({placeholders}) "
-            "AND memory_kind='daily' AND COALESCE(compression_stage,0)=0",
-            tuple(sorted(ids)),
+            "AND memory_kind='daily' AND COALESCE(compression_stage,0)<?",
+            (*sorted(ids), DAILY_COMPRESSION_FINAL_STAGE),
         )
         await db.commit()
         return cur.rowcount if cur.rowcount is not None else 0
@@ -1709,8 +2411,9 @@ async def _delete_chatroom_daily_ids(ids: set[str]) -> int:
 
 async def _apply_main_daily_draft(payload: dict) -> dict:
     created_daily, created_important, covered = [], [], set()
+    payload = _refresh_payload_covered_ids(payload)
     for batch in (payload.get("main") or {}).get("batches") or []:
-        covered.update(batch.get("covered_ids") or [])
+        covered.update(_batch_covered_ids(batch))
         for item in batch.get("compressed_daily") or []:
             mem_id = await _insert_main_compressed_memory(
                 content=str(item.get("content") or "").strip(),
@@ -1719,7 +2422,9 @@ async def _apply_main_daily_draft(payload: dict) -> dict:
                 importance=max(0.0, min(0.6, float(item.get("importance", 0.25)))),
                 source_rows=_source_rows_from_draft_item(item),
                 memory_time=float(item.get("memory_time") or time.time()),
-                compression_stage=1,
+                compression_stage=max(1, min(DAILY_COMPRESSION_FINAL_STAGE, int(item.get("compression_stage") or batch.get("output_stage") or 1))),
+                source_msg_ids=_draft_item_source_msg_ids(item),
+                evidence_summary=_draft_item_evidence_summary(item),
             )
             if mem_id:
                 created_daily.append(mem_id)
@@ -1735,6 +2440,8 @@ async def _apply_main_daily_draft(payload: dict) -> dict:
                 source_rows=_source_rows_from_draft_item(item),
                 memory_time=float(item.get("memory_time") or time.time()),
                 compression_stage=0,
+                source_msg_ids=_draft_item_source_msg_ids(item),
+                evidence_summary=_draft_item_evidence_summary(item),
             )
             if mem_id:
                 created_important.append(mem_id)
@@ -1769,8 +2476,9 @@ async def _apply_main_daily_draft(payload: dict) -> dict:
 async def _apply_chatroom_daily_draft(payload: dict) -> dict:
     from chatroom import save_chatroom_memory
     created_daily, created_important, covered = [], [], set()
+    payload = _refresh_payload_covered_ids(payload)
     for batch in (payload.get("chatroom") or {}).get("batches") or []:
-        covered.update(batch.get("covered_ids") or [])
+        covered.update(_batch_covered_ids(batch))
         for item in batch.get("compressed_daily") or []:
             mem_id = await save_chatroom_memory(
                 room_id=item.get("room_id") or "connor_unified",
@@ -1780,9 +2488,11 @@ async def _apply_chatroom_daily_draft(payload: dict) -> dict:
                 importance=max(0.0, min(0.6, float(item.get("importance", 0.25)))),
                 source_start_ts=item.get("source_start_ts"),
                 source_end_ts=item.get("source_end_ts"),
-                source_msg_id="[]",
+                source_msg_id=json.dumps(_draft_item_source_msg_ids(item), ensure_ascii=False),
                 memory_kind="daily",
-                compression_stage=1,
+                compression_stage=max(1, min(DAILY_COMPRESSION_FINAL_STAGE, int(item.get("compression_stage") or batch.get("output_stage") or 1))),
+                evidence_summary=_draft_item_evidence_summary(item),
+                evidence_detail_level="summary",
                 created_at=float(item.get("memory_time") or item.get("source_start_ts") or time.time()),
             )
             if mem_id:
@@ -1800,9 +2510,11 @@ async def _apply_chatroom_daily_draft(payload: dict) -> dict:
                 importance=min(1.0, importance),
                 source_start_ts=item.get("source_start_ts"),
                 source_end_ts=item.get("source_end_ts"),
-                source_msg_id="[]",
+                source_msg_id=json.dumps(_draft_item_source_msg_ids(item), ensure_ascii=False),
                 memory_kind="long_term",
                 compression_stage=0,
+                evidence_summary=_draft_item_evidence_summary(item),
+                evidence_detail_level="summary",
                 created_at=float(item.get("memory_time") or item.get("source_start_ts") or time.time()),
             )
             if mem_id:
@@ -1843,7 +2555,7 @@ async def apply_daily_compression_review(review_id: str) -> dict:
         return {"ok": False, "message": "没有找到这份压缩草稿。"}
     if review["status"] != "draft":
         return {"ok": False, "message": "这份压缩草稿当前不能应用。", "review": review}
-    payload = review.get("payload") or {}
+    payload = _refresh_payload_covered_ids(review.get("payload") or {})
     main_result = await _apply_main_daily_draft(payload)
     chatroom_result = await _apply_chatroom_daily_draft(payload)
     apply_result = {"main": main_result, "chatroom": chatroom_result}
@@ -1885,7 +2597,7 @@ async def discard_daily_compression_review(review_id: str) -> dict:
     return {"ok": True, "review": discarded, "message": "压缩草稿已废弃。"}
 
 
-async def compress_expired_daily_memories(days: int = 14) -> dict:
+async def compress_expired_daily_memories(days: int = 15) -> dict:
     """Compatibility wrapper: create a draft instead of applying immediately."""
     return await generate_daily_compression_draft(days=days, target="both")
 

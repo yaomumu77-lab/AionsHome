@@ -11,7 +11,7 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="✨ Aion Oloth"
+        android:text="@string/app_name"
         android:textSize="28sp"
         android:textColor="#ff8359"
         android:textStyle="bold"
@@ -45,6 +45,26 @@
         android:textColor="#666666"
         android:layout_marginBottom="24dp" />
 
+    <!-- 户外 Cloudflare -->
+    <Button
+        android:id="@+id/btnCloudflare"
+        android:layout_width="280dp"
+        android:layout_height="wrap_content"
+        android:text="⚡  户外 Cloudflare"
+        android:textSize="16sp"
+        android:textColor="#ffffff"
+        android:backgroundTint="#5f4a1d"
+        android:padding="16dp"
+        android:layout_marginBottom="4dp" />
+
+    <TextView
+        android:id="@+id/tvCloudflareUrl"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textSize="12sp"
+        android:textColor="#666666"
+        android:layout_marginBottom="24dp" />
+
     <!-- 户外 Tailscale -->
     <Button
         android:id="@+id/btnOutdoor"
@@ -63,7 +83,7 @@
         android:layout_height="wrap_content"
         android:textSize="12sp"
         android:textColor="#666666"
-        android:layout_marginBottom="40dp" />
+        android:layout_marginBottom="32dp" />
 
     <!-- 记住选择 -->
     <CheckBox
@@ -78,7 +98,7 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="手势返回到首页可切换地址\nHTTPS 自签证书，支持手机麦克风"
+        android:text="手势返回到首页可切换地址\n局域网 / Cloudflare / Tailscale 三线可选"
         android:textSize="11sp"
         android:textColor="#555555"
         android:layout_marginTop="16dp" />

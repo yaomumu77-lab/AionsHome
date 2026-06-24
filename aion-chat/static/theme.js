@@ -1,7 +1,7 @@
 (function () {
   const KEY = 'aion_chat_theme';
   const STYLE_ID = 'aion-theme-css';
-  const STYLE_HREF = '/static/theme.css?v=20260606';
+  const STYLE_HREF = '/static/theme.css?v=20260621-theater';
 
   function normalizeTheme(theme) {
     return theme === 'light' ? 'light' : 'dark';

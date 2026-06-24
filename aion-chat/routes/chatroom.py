@@ -34,8 +34,11 @@ from context_builder import (
     WISH_CMD_PATTERN,
     append_message_meta,
 )
-from memory import get_embedding, _pack_embedding, memory_kind_for_type, memory_kind_label
-from schedule import process_schedule_commands, ALARM_CMD, REMINDER_CMD, MONITOR_CMD, _parse_dt, _is_schedule_time_stale
+from memory import get_embedding, _pack_embedding, memory_kind_for_type, memory_kind_label, _memory_time_payload
+from schedule import (
+    process_schedule_commands, ALARM_CMD, REMINDER_CMD, MONITOR_CMD,
+    SCHEDULE_DEL_CMD, SCHEDULE_LIST_CMD, _parse_dt, _is_schedule_time_stale,
+)
 from music import search_songs, get_audio_url
 from camera import cam, CAM_CHECK_CMD
 from luckin import handle_luckin_commands, luckin_payment_attachments
@@ -45,6 +48,9 @@ router = APIRouter(prefix="/api/chatroom", tags=["chatroom"])
 
 TRANSFER_CMD_PATTERN = re.compile(r'\[转账(?:给([^：:]+?))?[：:]\s*(-?\d+(?:\.\d+)?)\s*元\]')
 _STRUCTURED_LINE_RE = re.compile(r"^\s*(```|[-*+]\s+|\d+[.)]\s+|[>|#]|\|)")
+ORPHAN_HOME_ARGS_PATTERN = re.compile(
+    r'(?im)^\s*[^\n\[]+\|(?:mode|hvac_mode|temperature|temp|fan_mode|fan|swing_mode|swing)\s*=[^\n\]]*\]?\s*$'
+)
 _AMBIENT_LAST_TRIGGER_BY_ROOM: dict[str, float] = {}
 _AMBIENT_GENERATING_ROOMS: set[str] = set()
 _AMBIENT_LISTENER_TTL = 18.0
@@ -67,6 +73,29 @@ def _normalize_cli_bubble_breaks(text: str, model_key: str | None) -> str:
         return text
 
     return "\n\n".join(lines)
+
+
+def _visible_chatroom_text(text: str) -> str:
+    """Remove local tool protocol tags and malformed HOME remnants from chatroom replies."""
+    if not text:
+        return ""
+
+    transfers: list[str] = []
+
+    def _hold_transfer(match: re.Match) -> str:
+        transfers.append(match.group(0))
+        return f"__AION_CHATROOM_TRANSFER_{len(transfers) - 1}__"
+
+    cleaned = TRANSFER_CMD_PATTERN.sub(_hold_transfer, text)
+    cleaned = strip_tool_commands(cleaned)
+    for pat in (ALARM_CMD, REMINDER_CMD, MONITOR_CMD, SCHEDULE_DEL_CMD, SCHEDULE_LIST_CMD):
+        cleaned = pat.sub("", cleaned)
+    cleaned = ORPHAN_HOME_ARGS_PATTERN.sub("", cleaned)
+    cleaned = META_TAG_PATTERN.sub("", cleaned).strip()
+
+    for idx, transfer in enumerate(transfers):
+        cleaned = cleaned.replace(f"__AION_CHATROOM_TRANSFER_{idx}__", transfer)
+    return cleaned.strip()
 
 
 def _chatroom_auto_tts_voice(sender: str) -> str:
@@ -580,7 +609,7 @@ async def _process_chatroom_commands(full_text: str, room_id: str, who: str, msg
     # 清理 META 标签
     full_text = META_TAG_PATTERN.sub("", full_text)
 
-    return full_text.strip(), triggered
+    return _visible_chatroom_text(full_text), triggered
 
 
 def _toy_attachments_from_triggered(triggered: dict) -> list[dict]:
@@ -650,6 +679,13 @@ def _fire_chatroom_followups(triggered: dict, room_id: str, sender: str, model_k
         asyncio.create_task(_chatroom_song_gen(room_id, sender, sg["prompt"], trigger_msg_id))
 
 
+async def _broadcast_chatroom_ai_status(room_id: str, sender: str, text: str):
+    await manager.broadcast({
+        "type": "chatroom_ai_status",
+        "data": {"room_id": room_id, "sender": sender, "text": text},
+    })
+
+
 async def _chatroom_cam_check(room_id: str, sender: str, model_key: str, delay: float = 5.0):
     """聊天室版监控查看：播放提示音 → 延迟截图 → AI 追加回复到聊天室"""
     from config import load_worldbook, SETTINGS, UPLOADS_DIR, SCREENSHOTS_DIR
@@ -659,8 +695,15 @@ async def _chatroom_cam_check(room_id: str, sender: str, model_key: str, delay: 
     await manager.broadcast({"type": "monitor_alert", "data": {"content": "监控查看"}})
     await asyncio.sleep(delay)
 
-    jpg_bytes = cam.get_frame_jpeg()
+    await _broadcast_chatroom_ai_status(room_id, sender, "正在获取监控画面...")
+
+    jpg_bytes = cam.get_frame_jpeg(force_pc_screen=True)
+    frame_source = "camera"
     if not jpg_bytes:
+        jpg_bytes = cam.get_screen_only_jpeg(force_pc_screen=True)
+        frame_source = "device"
+    if not jpg_bytes:
+        await _save_msg(room_id, "system", "未获取到可用监控画面（摄像头、电脑屏幕和手机屏幕均不可用）。", auto_tts=False)
         return
 
     ts = time.strftime("%Y%m%d_%H%M%S")
@@ -679,10 +722,13 @@ async def _chatroom_cam_check(room_id: str, sender: str, model_key: str, delay: 
     recent = _render_recent_room_messages_for_ai(msgs)
 
     cam_prompt = (
-        f"你刚才想看看{user_name}在干什么，这是系统从监控摄像头抓取的实时画面。"
+        f"你刚才想看看{user_name}在干什么，这是系统抓取的实时监控画面。"
+        f"画面可能包含摄像头、电脑屏幕和手机屏幕；如果没有摄像头画面，就只根据电脑/手机屏幕内容说明设备使用情况，不要推断身体位置。"
         f"请根据画面内容，自然地描述你看到的情况并和{user_name}互动。"
         f"不需要再说\"让我看看\"之类的话，直接说你看到了什么。"
     )
+    if frame_source == "device":
+        cam_prompt += "本次没有可用摄像头画面，系统改用电脑屏幕和/或手机屏幕截图。"
 
     prefix_msgs = []
     if wb.get("ai_persona") and sender == "aion":
@@ -702,20 +748,23 @@ async def _chatroom_cam_check(room_id: str, sender: str, model_key: str, delay: 
             _temp = SETTINGS.get("temperature")
             async for chunk in stream_ai(messages, model_key, temperature=_temp):
                 if chunk.startswith(CLI_STATUS_PREFIX):
+                    await _broadcast_chatroom_ai_status(room_id, sender, chunk[len(CLI_STATUS_PREFIX):])
                     continue
                 full_text += chunk
         else:
             async for chunk in _stream_connor_model(messages, model_key):
                 if chunk.startswith(CLI_STATUS_PREFIX):
+                    await _broadcast_chatroom_ai_status(room_id, sender, chunk[len(CLI_STATUS_PREFIX):])
                     continue
                 full_text += chunk
     except Exception as e:
         full_text = f"[监控查看失败] {e}"
 
     if not full_text.strip():
+        await _save_msg(room_id, "system", "监控画面已获取，但模型没有返回分析结果。", auto_tts=False)
         return
 
-    full_text = _normalize_cli_bubble_breaks(strip_tool_commands(full_text), model_key)
+    full_text = _normalize_cli_bubble_breaks(_visible_chatroom_text(full_text), model_key)
     await _save_msg(room_id, sender, full_text)
     print(f"[CHATROOM_CAM_CHECK] {sender} 查看监控完成, room={room_id}")
 
@@ -775,7 +824,7 @@ async def _chatroom_activity_check(room_id: str, sender: str, model_key: str, n:
     if not full_text.strip():
         return
 
-    full_text = _normalize_cli_bubble_breaks(strip_tool_commands(full_text), model_key)
+    full_text = _normalize_cli_bubble_breaks(_visible_chatroom_text(full_text), model_key)
     await _save_msg(room_id, sender, full_text)
     print(f"[CHATROOM_ACTIVITY] {sender} 查看动态完成, room={room_id}, n={n}")
 
@@ -882,7 +931,7 @@ async def _chatroom_poi_check(room_id: str, sender: str, model_key: str, categor
     if not full_text.strip():
         return
 
-    full_text = _normalize_cli_bubble_breaks(strip_tool_commands(full_text), model_key)
+    full_text = _normalize_cli_bubble_breaks(_visible_chatroom_text(full_text), model_key)
     await _save_msg(room_id, sender, full_text)
     searched_cats = "、".join(c.strip() for c in categories)
     print(f"[CHATROOM_POI] {sender} 搜索完成, room={room_id}, categories={searched_cats}")
@@ -1429,6 +1478,10 @@ class MsgRegenerate(BaseModel):
     whisper_mode: bool = False
 
 
+class DigestTrigger(BaseModel):
+    connor_model: Optional[str] = None
+
+
 class MessageFeedbackUpdate(BaseModel):
     rating: str
     reason: str
@@ -1439,6 +1492,7 @@ class MemoryCreate(BaseModel):
     keywords: str = ""
     importance: float = 0.5
     memory_kind: str = "long_term"
+    evidence_summary: str = ""
 
 
 class MemoryUpdate(BaseModel):
@@ -1446,6 +1500,8 @@ class MemoryUpdate(BaseModel):
     keywords: Optional[str] = None
     importance: Optional[float] = None
     memory_kind: Optional[str] = None
+    unresolved: Optional[int] = None
+    evidence_summary: Optional[str] = None
 
 
 class MemorySourceSelection(BaseModel):
@@ -1460,6 +1516,14 @@ async def _ensure_chatroom_memory_source_column():
             pass
         try:
             await db.execute("ALTER TABLE chatroom_memories ADD COLUMN memory_kind TEXT DEFAULT 'long_term'")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE chatroom_memories ADD COLUMN evidence_summary TEXT DEFAULT ''")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE chatroom_memories ADD COLUMN evidence_detail_level TEXT DEFAULT 'summary'")
         except Exception:
             pass
         await db.execute(
@@ -2003,6 +2067,7 @@ async def _save_msg(
     attachments: list = None,
     *,
     auto_tts: bool = True,
+    reasoning_content: str = "",
 ) -> dict:
     """保存消息到数据库"""
     now = time.time()
@@ -2012,13 +2077,13 @@ async def _save_msg(
     att_json = json.dumps(att_list, ensure_ascii=False) if att_list else "[]"
     async with get_db() as db:
         await db.execute(
-            "INSERT INTO chatroom_messages (id, room_id, sender, content, attachments, created_at) VALUES (?,?,?,?,?,?)",
-            (msg_id, room_id, sender, content, att_json, now),
+            "INSERT INTO chatroom_messages (id, room_id, sender, content, attachments, reasoning_content, created_at) VALUES (?,?,?,?,?,?,?)",
+            (msg_id, room_id, sender, content, att_json, reasoning_content, now),
         )
         await db.execute("UPDATE chatroom_rooms SET updated_at=? WHERE id=?", (now, room_id))
         await db.commit()
     msg = {"id": msg_id, "room_id": room_id, "sender": sender, "content": content,
-           "created_at": now, "attachments": att_list}
+           "created_at": now, "attachments": att_list, "reasoning_content": reasoning_content}
     await manager.broadcast({"type": "chatroom_msg_created", "data": msg})
 
     if auto_tts and content.strip():
@@ -2561,7 +2626,7 @@ async def _generate_connor_reply(room_id, room, msgs, _q, context_limit, *, conn
         import traceback
         traceback.print_exc()
         print(f"[CHATROOM] _process_chatroom_commands 异常: {e}")
-        clean_text = strip_tool_commands(full_text)
+        clean_text = _visible_chatroom_text(full_text)
         triggered = {}
 
     clean_text = _normalize_cli_bubble_breaks(clean_text, connor_model_key)
@@ -2657,7 +2722,7 @@ async def _reply_aion(room_id, msgs, context_limit, query_text, model_key, _q, *
         import traceback
         traceback.print_exc()
         print(f"[CHATROOM] _process_chatroom_commands 异常: {e}")
-        clean_text = strip_tool_commands(full_text)
+        clean_text = _visible_chatroom_text(full_text)
         triggered = {}
 
     clean_text = _normalize_cli_bubble_breaks(clean_text, model_key)
@@ -2674,6 +2739,7 @@ async def _reply_aion(room_id, msgs, context_limit, query_text, model_key, _q, *
         room_id, "aion", clean_text, aion_msg_id,
         attachments=saved_imgs + _music_attachments_from_triggered(triggered) + _luckin_attachments_from_triggered(triggered) + _toy_attachments_from_triggered(triggered),
         auto_tts=not (tts_enabled and tts_voice and clean_text),
+        reasoning_content=usage_meta.get("reasoning_content", "").strip(),
     )
     await _q.put({"type": "aion_done", "message": aion_msg})
     await _emit_chatroom_debug(_q, _chatroom_debug_payload(
@@ -2734,7 +2800,7 @@ async def _reply_connor(room_id, msgs, context_limit, query_text, _q, *, connor_
         import traceback
         traceback.print_exc()
         print(f"[CHATROOM] _process_chatroom_commands 异常: {e}")
-        clean_text = strip_tool_commands(full_text)
+        clean_text = _visible_chatroom_text(full_text)
         triggered = {}
 
     clean_text = _normalize_cli_bubble_breaks(clean_text, connor_model_key)
@@ -2751,6 +2817,7 @@ async def _reply_connor(room_id, msgs, context_limit, query_text, _q, *, connor_
         room_id, "connor", clean_text, connor_msg_id,
         attachments=saved_imgs + _music_attachments_from_triggered(triggered) + _luckin_attachments_from_triggered(triggered) + _toy_attachments_from_triggered(triggered),
         auto_tts=not (tts_enabled and tts_voice and clean_text),
+        reasoning_content=usage_meta.get("reasoning_content", "").strip(),
     )
     await _q.put({"type": "connor_done", "message": connor_msg})
     await _emit_chatroom_debug(_q, _chatroom_debug_payload(
@@ -2865,8 +2932,8 @@ async def list_room_memories(room_id: str):
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "SELECT id, room_id, scope, content, keywords, importance, created_at, unresolved, "
-            "source_start_ts, source_end_ts, source_msg_id, memory_kind "
-            "FROM chatroom_memories ORDER BY created_at DESC",
+            "source_start_ts, source_end_ts, source_msg_id, memory_kind, evidence_summary, evidence_detail_level "
+            "FROM chatroom_memories ORDER BY COALESCE(source_end_ts, source_start_ts, created_at) DESC",
         )
         rows = await cur.fetchall()
         result = []
@@ -2879,7 +2946,7 @@ async def list_room_memories(room_id: str):
                 ) else "long_term"
             item["memory_kind_label"] = "日常" if item["memory_kind"] == "daily" else "长期重要"
             explicit_source = bool(str(item.get("source_msg_id") or "").strip())
-            source_ids = _source_ids_for_chatroom_memory(row)
+            source_ids = _source_ids_for_chatroom_memory(item)
             if explicit_source:
                 item["source_count"] = len(source_ids)
             elif item.get("source_start_ts") and item.get("source_end_ts"):
@@ -2891,13 +2958,15 @@ async def list_room_memories(room_id: str):
                 item["source_count"] = (await cur.fetchone())[0]
             else:
                 item["source_count"] = 0
+            item.update(_memory_time_payload(item))
             result.append(item)
         return result
 
 
 @router.post("/rooms/{room_id}/digest")
-async def trigger_digest(room_id: str, model: str = DEFAULT_MODEL):
-    result = await digest_chatroom()
+async def trigger_digest(room_id: str, body: Optional[DigestTrigger] = None):
+    connor_model_key = _resolve_connor_model(body.connor_model if body else None)
+    result = await digest_chatroom(model_key=connor_model_key)
     return result
 
 
@@ -2918,6 +2987,7 @@ async def create_memory(room_id: str, body: MemoryCreate):
         keywords=body.keywords,
         importance=body.importance,
         memory_kind="daily" if body.memory_kind == "daily" else "long_term",
+        evidence_summary=body.evidence_summary,
     )
     return {"ok": True, "id": mem_id}
 
@@ -2939,6 +3009,12 @@ async def update_memory(mem_id: str, body: MemoryUpdate):
         if body.memory_kind is not None:
             sets.append("memory_kind=?")
             vals.append("daily" if body.memory_kind == "daily" else "long_term")
+        if body.unresolved is not None:
+            sets.append("unresolved=?")
+            vals.append(1 if body.unresolved else 0)
+        if body.evidence_summary is not None:
+            sets.append("evidence_summary=?")
+            vals.append(str(body.evidence_summary or "").strip())
         if sets:
             vals.append(mem_id)
             await db.execute(f"UPDATE chatroom_memories SET {', '.join(sets)} WHERE id=?", vals)
@@ -2953,6 +3029,26 @@ async def update_memory(mem_id: str, body: MemoryUpdate):
                                      (_pack_embedding(emb), mem_id))
                     await db.commit()
     return {"ok": True}
+
+
+@router.patch("/memories/{mem_id}/unresolved")
+async def toggle_memory_unresolved(mem_id: str):
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT unresolved FROM chatroom_memories WHERE id=?",
+            (mem_id,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return {"ok": False, "message": "Memory not found"}
+        new_val = 0 if row["unresolved"] else 1
+        await db.execute(
+            "UPDATE chatroom_memories SET unresolved=? WHERE id=?",
+            (new_val, mem_id),
+        )
+        await db.commit()
+    return {"ok": True, "unresolved": new_val}
 
 
 @router.get("/memories/{mem_id}/source-legacy")
@@ -3033,6 +3129,7 @@ async def get_memory_source(mem_id: str):
         existing = {m["id"] for m in messages}
         extra = await _fetch_chatroom_source_rows_by_ids(list(selected_ids - existing))
         messages.extend([m for m in extra if m["id"] not in existing])
+        messages = [m for m in messages if m["id"] in selected_ids]
 
     exact_mode = bool(selected_ids)
     keywords = _chatroom_keyword_list(mem["keywords"])
@@ -3125,6 +3222,7 @@ async def save_memory_source_selection(mem_id: str, body: MemorySourceSelection)
         "source_start_ts": source_start,
         "source_end_ts": source_end,
         "selected_count": len(source_ids),
+        **_memory_time_payload({"source_start_ts": source_start, "source_end_ts": source_end}),
     }
 
 

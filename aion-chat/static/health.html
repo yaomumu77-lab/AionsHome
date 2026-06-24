@@ -447,6 +447,7 @@ const BLE_SERVICES = [
 const ALL_SERVICE_UUIDS = BLE_SERVICES.map(s => s.service);
 const HEALTH_ACK_MAP = { 0x0513: DT_HEALTH_SLEEP, 0x0515: DT_HEALTH_HEART, 0x0517: DT_HEALTH_BLOOD, 0x0518: DT_HEALTH_ALL, 0x0522: DT_HEALTH_SPO2, 0x0534: DT_HEALTH_BODY };
 const HEALTH_REQUEST_CMDS = new Set([DT_HEALTH_SLEEP, DT_HEALTH_HEART, DT_HEALTH_BLOOD, DT_HEALTH_ALL, DT_HEALTH_SPO2, DT_HEALTH_BODY]);
+const HEALTH_HISTORY_TIMEOUT_MS = 120000;
 const HEALTH_ACCUMULATE_TIMEOUT_MS = 5000;
 const HEART_MEASURE_TYPE = 0;
 const HEART_MONITOR_INTERVAL_MIN = 10;
@@ -818,7 +819,7 @@ document.addEventListener('visibilitychange', () => {
       clearTimeout(ringReconnectTimer);
       ringReconnectTimer = null;
     }
-    releaseRingForBackgroundSync('hidden');
+    return;
   } else {
     ringReconnectTimer = setTimeout(reconnectSavedRingIfNeeded, 500);
   }
@@ -1037,19 +1038,27 @@ async function syncRingHistory(auto = false) {
   historyData = {};
   try {
     const types = [
-      [DT_HEALTH_SLEEP, '睡眠'],
       [DT_HEALTH_HEART, '心率'],
-      [DT_HEALTH_BLOOD, '血压'],
-      [DT_HEALTH_ALL, '综合'],
-      [DT_HEALTH_SPO2, '血氧'],
-      [DT_HEALTH_BODY, '身体数据']
+      ...(auto ? [] : [
+        [DT_HEALTH_SLEEP, '睡眠'],
+        [DT_HEALTH_BLOOD, '血压'],
+        [DT_HEALTH_ALL, '综合'],
+        [DT_HEALTH_SPO2, '血氧'],
+        [DT_HEALTH_BODY, '身体数据']
+      ])
     ];
     for (const [dt, name] of types) {
       logRing(`请求${name}历史`);
-      const promise = waitForResponse(dt, 35000);
+      const promise = waitForResponse(dt, HEALTH_HISTORY_TIMEOUT_MS);
       await sendPacket(dt, new Uint8Array(0));
-      await promise;
+      const response = await promise;
+      if (response == null) logRing(`${name}历史等待超时`);
       await sleep(350);
+    }
+    if (auto) {
+      const saved = await uploadLatestHeartHistory();
+      if (!saved) logRing('没有同步到新的心率历史');
+      return;
     }
     const payload = buildSnapshotPayload();
     if (!payload) {
@@ -1066,6 +1075,16 @@ async function syncRingHistory(auto = false) {
     syncing = false;
     setBusy('btnSync', false, '同步新数据');
   }
+}
+
+async function uploadLatestHeartHistory() {
+  const heart = latestHistoryRecord(historyData[DT_HEALTH_HEART]);
+  if (!heart || !_validHrClient(heart.hr)) return null;
+  return uploadHeartRate(heart.hr, heart.time.getTime() / 1000, 'history-heart');
+}
+
+function latestHistoryRecord(list) {
+  return (list && list.length) ? [...list].sort((a, b) => b.time - a.time)[0] : null;
 }
 
 async function refreshHeartRateHistory() {
@@ -1107,7 +1126,7 @@ async function clearRingCache() {
   }
 }
 
-function waitForResponse(dataType, timeoutMs = 30000) {
+function waitForResponse(dataType, timeoutMs = HEALTH_HISTORY_TIMEOUT_MS) {
   return new Promise(resolve => {
     const timer = setTimeout(() => {
       delete pendingResponses[dataType];
@@ -1300,13 +1319,12 @@ function handleGenericHistory(dataType, payload) {
 }
 
 function buildSnapshotPayload() {
-  const latest = list => (list && list.length) ? [...list].sort((a,b) => b.time - a.time)[0] : null;
-  const all = latest(historyData[DT_HEALTH_ALL]);
-  const heart = latest(historyData[DT_HEALTH_HEART]);
-  const blood = latest(historyData[DT_HEALTH_BLOOD]);
-  const spo2 = latest(historyData[DT_HEALTH_SPO2]);
-  const body = latest(historyData[DT_HEALTH_BODY]);
-  const sleep = latest(historyData[DT_HEALTH_SLEEP]);
+  const all = latestHistoryRecord(historyData[DT_HEALTH_ALL]);
+  const heart = latestHistoryRecord(historyData[DT_HEALTH_HEART]);
+  const blood = latestHistoryRecord(historyData[DT_HEALTH_BLOOD]);
+  const spo2 = latestHistoryRecord(historyData[DT_HEALTH_SPO2]);
+  const body = latestHistoryRecord(historyData[DT_HEALTH_BODY]);
+  const sleep = latestHistoryRecord(historyData[DT_HEALTH_SLEEP]);
   if (!all && !heart && !blood && !spo2 && !body && !sleep) return null;
   const measuredDates = [all, heart, blood, spo2, body].filter(Boolean).map(r => r.time.getTime());
   const measuredAt = measuredDates.length ? Math.max(...measuredDates) / 1000 : Date.now() / 1000;

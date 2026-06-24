@@ -267,12 +267,16 @@
         <button class="close-btn" onclick="closeMemory()">✕</button>
       </div>
       <div class="panel-body">
-        <div style="display:flex; gap:6px; margin-bottom:12px;">
-          <button class="mem-add-btn" style="flex:1;" onclick="showAddMemory()">+ 手动添加</button>
-          <button class="mem-add-btn" id="chatroomCompressDailyBtn" style="flex:1; background:#6a4c93;" onclick="compressChatroomDailyMemories()">🗜️ 压缩日常</button>
-          <button class="mem-add-btn" style="flex:1; background:var(--text3);" onclick="triggerDigest()">📝 总结记忆</button>
+        <div class="memory-tools">
+          <input id="memSearch" class="memory-search" type="text" placeholder="搜索记忆..." oninput="filterChatroomMemories()">
+          <div class="memory-tabs" role="tablist" aria-label="记忆分类">
+            <button class="memory-tab active" data-kind="all" onclick="setChatroomMemoryKindFilter('all')">全部</button>
+            <button class="memory-tab" data-kind="daily" onclick="setChatroomMemoryKindFilter('daily')">日常</button>
+            <button class="memory-tab" data-kind="long_term" onclick="setChatroomMemoryKindFilter('long_term')">长期重要</button>
+          </div>
         </div>
-        <div class="chatroom-compress-review" id="chatroomCompressReview" style="display:none"></div>
+        <!-- 记忆列表 -->
+        <div id="memList" class="memory-list"></div>
         <!-- 添加/编辑表单 -->
         <div id="memForm" style="display:none; margin-bottom:12px; padding:10px; background:var(--bg); border-radius:8px;">
           <input type="hidden" id="memEditId">
@@ -302,8 +306,12 @@
             <button class="save-btn" style="flex:none; padding:7px 14px; background:var(--text3);" onclick="hideMemForm()">取消</button>
           </div>
         </div>
-        <!-- 记忆列表 -->
-        <div id="memList"></div>
+        <div class="memory-footer-actions">
+          <button class="mem-add-btn" onclick="showAddMemory()">+ 手动添加</button>
+          <button class="mem-add-btn" id="chatroomCompressDailyBtn" style="background:#6a4c93;" onclick="compressChatroomDailyMemories()">🗜️ 压缩日常</button>
+          <button class="mem-add-btn" style="background:var(--text3);" onclick="triggerDigest()">📝 总结记忆</button>
+        </div>
+        <div class="chatroom-compress-review" id="chatroomCompressReview" style="display:none"></div>
       </div>
     </div>
     <!-- 原文追溯浮层 -->
@@ -422,6 +430,6 @@
     </div>
   </div>
 
-  <script src="/static/chatroom.js?v=song-player-20260615c"></script>
+  <script src="/static/chatroom.js?v=digest-model-20260624"></script>
 </body>
 </html>

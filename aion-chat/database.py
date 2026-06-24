@@ -37,6 +37,7 @@ async def init_db():
         except:
             pass
         for col, defn in [
+            ("reasoning_content", "TEXT DEFAULT ''"),
             ("ai_feedback_rating", "TEXT DEFAULT ''"),
             ("ai_feedback_reason", "TEXT DEFAULT ''"),
             ("ai_feedback_created_at", "REAL"),
@@ -70,6 +71,8 @@ async def init_db():
             ("unresolved", "INTEGER DEFAULT 0"),
             ("source_msg_id", "TEXT"),
             ("compression_stage", "INTEGER DEFAULT 0"),
+            ("evidence_summary", "TEXT DEFAULT ''"),
+            ("evidence_detail_level", "TEXT DEFAULT 'summary'"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE memories ADD COLUMN {col} {defn}")
@@ -428,6 +431,7 @@ async def init_db():
             )
         """)
         for col, defn in [
+            ("reasoning_content", "TEXT DEFAULT ''"),
             ("ai_feedback_rating", "TEXT DEFAULT ''"),
             ("ai_feedback_reason", "TEXT DEFAULT ''"),
             ("ai_feedback_created_at", "REAL"),
@@ -524,6 +528,14 @@ async def init_db():
             pass
         try:
             await db.execute("ALTER TABLE chatroom_memories ADD COLUMN compression_stage INTEGER DEFAULT 0")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE chatroom_memories ADD COLUMN evidence_summary TEXT DEFAULT ''")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE chatroom_memories ADD COLUMN evidence_detail_level TEXT DEFAULT 'summary'")
         except:
             pass
         await db.execute(

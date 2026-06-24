@@ -15,6 +15,8 @@ let pendingAttachments = [];  // [{url, type, name}]
 let crMessagesById = {};
 let memSourceMemId = null;
 let memSourceMessages = [];
+let chatroomMemoryCache = [];
+let chatroomMemoryKindFilter = 'all';
 let chatroomDailyCompressReview = null;
 let crMsgDebugData = {};
 let crSystemLogs = [];
@@ -140,6 +142,7 @@ const crSeenTTSChunks = new Set();
 const crSeenTTSDone = new Set();
 let crWs = null;
 let crTtsAcceptAfter = Date.now() / 1000;
+let crTtsPlaybackActiveAt = Date.now() / 1000;
 const crSuppressedTTSMsgIds = new Set();
 const crIsEmbedded = (() => {
   try { return window.parent && window.parent !== window; }
@@ -290,7 +293,7 @@ const _ttsEngine = (function() {
 let crTtsAudio = _ttsEngine.audio;
 
 function crTtsPlaybackAllowed() {
-  return !crIsEmbedded && document.visibilityState !== 'hidden';
+  return !crIsEmbedded;
 }
 
 function crCurrentTTSVoice() {
@@ -304,20 +307,12 @@ function crSendTTSState() {
     enabled: crTtsEnabled,
     voice: crCurrentTTSVoice(),
     can_play: crTtsPlaybackAllowed(),
-    active_at: Date.now() / 1000,
+    active_at: crTtsPlaybackActiveAt,
     client_id: crAmbientClientId
   }));
 }
 
 function crRefreshTTSPlaybackState() {
-  crTtsAcceptAfter = Date.now() / 1000;
-  if (!crTtsPlaybackAllowed()) crStopTTS();
-  crSendTTSState();
-}
-
-function crSuspendTTSPlaybackState() {
-  crTtsAcceptAfter = Date.now() / 1000;
-  crStopTTS();
   crSendTTSState();
 }
 
@@ -326,6 +321,7 @@ function crBumpTTSPlaybackState() {
   const now = Date.now();
   if (now - crTtsPlaybackStateLastSent < 1000) return;
   crTtsPlaybackStateLastSent = now;
+  crTtsPlaybackActiveAt = now / 1000;
   crSendTTSState();
 }
 
@@ -336,11 +332,6 @@ function crSuppressTTSMsg(msgId) {
 function crShouldAcceptTTSMsg(msgId, createdAt, targetClientId) {
   if (!msgId || crSuppressedTTSMsgIds.has(msgId)) return false;
   if (targetClientId && targetClientId !== crAmbientClientId) return false;
-  if (!crTtsPlaybackAllowed()) {
-    crSuppressTTSMsg(msgId);
-    crStopTTS();
-    return false;
-  }
   const ts = Number(createdAt || 0);
   if (ts && ts < crTtsAcceptAfter) {
     crSuppressTTSMsg(msgId);
@@ -350,12 +341,12 @@ function crShouldAcceptTTSMsg(msgId, createdAt, targetClientId) {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (crTtsPlaybackAllowed()) crRefreshTTSPlaybackState();
-  else crSuspendTTSPlaybackState();
+  if (document.visibilityState === 'hidden') crRefreshTTSPlaybackState();
+  else crBumpTTSPlaybackState();
 });
-window.addEventListener('pagehide', crSuspendTTSPlaybackState);
-window.addEventListener('pageshow', crRefreshTTSPlaybackState);
-document.addEventListener('freeze', crSuspendTTSPlaybackState);
+window.addEventListener('pagehide', crRefreshTTSPlaybackState);
+window.addEventListener('pageshow', crBumpTTSPlaybackState);
+document.addEventListener('freeze', crRefreshTTSPlaybackState);
 window.addEventListener('focus', crBumpTTSPlaybackState);
 document.addEventListener('pointerdown', crBumpTTSPlaybackState, { passive: true });
 document.addEventListener('keydown', crBumpTTSPlaybackState);
@@ -625,6 +616,7 @@ function _crPlayReplayChunk(btn) {
 function onTtsToggleChange() {
   crTtsEnabled = document.getElementById('setTtsEnabled').checked;
   crTtsAcceptAfter = Date.now() / 1000;
+  crTtsPlaybackActiveAt = crTtsAcceptAfter;
   if (!crTtsEnabled) crStopTTS();
   // 持久化到服务端，所有窗口共享
   api('/config', { method: 'PUT', body: JSON.stringify({ tts_enabled: crTtsEnabled }) }).catch(() => {});
@@ -1734,12 +1726,12 @@ function crClearSystemLog() {
   crRenderSystemLogList();
 }
 
-async function fetchCurrentModel() {
+async function fetchCurrentModel(configPromise) {
   try {
     const [convs, models, cfg] = await Promise.all([
-      (await fetch('/api/conversations')).json(),
-      (await fetch('/api/models')).json(),
-      api('/config'),
+      fetch('/api/conversations').then(resp => resp.json()),
+      fetch('/api/models').then(resp => resp.json()),
+      configPromise || api('/config'),
     ]);
     if (Array.isArray(models)) chatroomModels = models;
     if (cfg?.connor_model) chatroomConnorModel = cfg.connor_model;
@@ -1869,7 +1861,29 @@ async function loadMessages() {
   oldestMsgTs = null;
   noMoreMessages = false;
   loadingOlder = false;
-  const msgs = await api(`/rooms/${currentRoom.id}/messages?limit=100`);
+  const snapshotKey = `chatroom_messages_snapshot_v1_${currentRoom.id}`;
+  let snapshotShown = false;
+  try {
+    const bridge = (() => {
+      try { return window.top?.AppSharedData || window.AppSharedData || null; }
+      catch(e) { return window.AppSharedData || null; }
+    })();
+    const rawSnapshot = bridge?.get?.(snapshotKey) || localStorage.getItem(snapshotKey) || '';
+    const snapshot = JSON.parse(rawSnapshot || 'null');
+    if (snapshot && Array.isArray(snapshot.messages)) {
+      renderMessages(snapshot.messages);
+      scrollToBottom(true);
+      snapshotShown = true;
+    }
+  } catch(e) {}
+
+  let msgs;
+  try {
+    msgs = await api(`/rooms/${currentRoom.id}/messages?limit=100`);
+  } catch(e) {
+    if (snapshotShown) return;
+    throw e;
+  }
   if (msgs && msgs.length) {
     oldestMsgTs = msgs[0].created_at;
     noMoreMessages = msgs.length < 100;
@@ -1878,6 +1892,16 @@ async function loadMessages() {
   }
   renderMessages(msgs);
   scrollToBottom(true);
+  try {
+    const payload = JSON.stringify({ savedAt: Date.now(), messages: msgs });
+    if (payload.length < 900000) {
+      localStorage.setItem(snapshotKey, payload);
+      try {
+        const bridge = window.top?.AppSharedData || window.AppSharedData;
+        bridge?.put?.(snapshotKey, payload);
+      } catch(e) {}
+    }
+  } catch(e) {}
 }
 
 async function loadOlderMessages() {
@@ -2163,6 +2187,7 @@ function crMsgFeedbackHtml(msg) {
   return `<span class="msg-feedback-actions">
     <button class="msg-feedback-btn ${likeActive}" onclick="openCrMsgFeedback(event,'${msg.id}','like')" title="喜欢这条回复">👍</button>
     <button class="msg-feedback-btn ${dislikeActive}" onclick="openCrMsgFeedback(event,'${msg.id}','dislike')" title="不喜欢这条回复">👎</button>
+    ${msg.reasoning_content ? `<button class="msg-feedback-btn msg-reasoning-btn" onclick="openCrMsgReasoning(event,'${msg.id}')" title="查看思考过程">💭</button>` : ''}
   </span>`;
 }
 
@@ -2237,7 +2262,7 @@ function msgHTML(m) {
   // AI 消息使用 escWithImages 解析 [[image:...]] 和转账卡片，用户消息也渲染转账卡片
   const fmt = isUser ? escWithTransfer : escWithImages;
   let bubblesHtml = '';
-  if (!isVoiceOnly && !hasWishFulfillmentAtt) {
+  if (!isVoiceOnly && (!hasWishFulfillmentAtt || !isUser)) {
     const parts = crBubbleParts(raw, isUser);
     if (parts.length > 1) {
       bubblesHtml = '<div class="bubbles">' + parts.map(p => `<div class="bubble">${fmt(p)}</div>`).join('') + '</div>';
@@ -2276,9 +2301,10 @@ function msgHTML(m) {
         </div>
         <div class="msg-content">
           ${senderLine}
+          ${hasWishFulfillmentAtt ? attHtml : ''}
           ${bubblesHtml}
           ${toyHtml}
-          ${attHtml}
+          ${hasWishFulfillmentAtt ? '' : attHtml}
         </div>
       </div>
       <div class="message-meta">${time}</div>
@@ -2286,6 +2312,41 @@ function msgHTML(m) {
 }
 
 let crMsgFeedbackPopover = null;
+let crMsgReasoningPopover = null;
+
+function closeCrMsgReasoningPopover() {
+  if (crMsgReasoningPopover) {
+    crMsgReasoningPopover.remove();
+    crMsgReasoningPopover = null;
+  }
+}
+
+function openCrMsgReasoning(ev, msgId) {
+  ev?.stopPropagation?.();
+  closeCrMsgFeedbackPopover();
+  closeCrMsgReasoningPopover();
+  const reasoning = crMessagesById[msgId]?.reasoning_content || '';
+  if (!reasoning.trim()) return;
+  const pop = document.createElement('div');
+  pop.className = 'msg-reasoning-popover';
+  const title = document.createElement('div');
+  title.className = 'msg-reasoning-title';
+  title.textContent = '思考过程';
+  const content = document.createElement('div');
+  content.className = 'msg-reasoning-content';
+  content.textContent = reasoning;
+  pop.append(title, content);
+  document.body.appendChild(pop);
+  crMsgReasoningPopover = pop;
+  const rect = ev?.currentTarget?.getBoundingClientRect?.();
+  if (rect) {
+    const pad = 8;
+    const width = pop.offsetWidth;
+    const height = pop.offsetHeight;
+    pop.style.left = `${Math.min(Math.max(pad, rect.left), window.innerWidth - width - pad)}px`;
+    pop.style.top = `${rect.bottom + 6 + height <= window.innerHeight - pad ? rect.bottom + 6 : Math.max(pad, rect.top - height - 6)}px`;
+  }
+}
 
 function closeCrMsgFeedbackPopover() {
   if (crMsgFeedbackPopover) {
@@ -2506,8 +2567,9 @@ async function regenerateChatroomMsg(msgId) {
 
 // 点击空白处关闭下拉菜单
 document.addEventListener('click', (e) => {
-  if (crMsgFeedbackPopover && e.target?.closest?.('.msg-feedback-popover, .msg-feedback-btn')) return;
+  if (e.target?.closest?.('.msg-feedback-popover, .msg-reasoning-popover, .msg-feedback-btn')) return;
   closeCrMsgFeedbackPopover();
+  closeCrMsgReasoningPopover();
   document.querySelectorAll('.msg-menu-dropdown.show').forEach(d => d.classList.remove('show'));
 });
 
@@ -3598,6 +3660,7 @@ async function saveSettings() {
   // 同步本地变量
   crTtsAionVoice = document.getElementById('setTtsAionVoice').value;
   crTtsConnorVoice = document.getElementById('setTtsConnorVoice').value;
+  crTtsPlaybackActiveAt = Date.now() / 1000;
   crSendTTSState();
   chatroomReplyOrder = nextReplyOrder;
   updateHeaderActions();
@@ -3614,7 +3677,10 @@ async function saveSettings() {
 async function triggerDigest() {
   if (!currentRoom) return;
   toast('正在总结记忆...');
-  const result = await api(`/rooms/${currentRoom.id}/digest`, { method: 'POST' });
+  const result = await api(`/rooms/${currentRoom.id}/digest`, {
+    method: 'POST',
+    body: JSON.stringify({ connor_model: chatroomConnorModel })
+  });
   toast(result.message || '总结完成');
   loadMemories();
 }
@@ -3670,6 +3736,31 @@ function chatroomDraftTime(ts) {
   return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
+function crFormatMemoryOccurrence(m) {
+  if (m?.memory_time_label) return m.memory_time_label;
+  const start = Number(m?.source_start_ts || 0);
+  const end = Number(m?.source_end_ts || 0);
+  const created = Number(m?.created_at || 0);
+  const fmt = ts => new Date(ts * 1000).toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  if (start > 0) {
+    if (end > 0 && Math.abs(end - start) >= 60) {
+      const sameDay = new Date(start * 1000).toDateString() === new Date(end * 1000).toDateString();
+      const endText = sameDay
+        ? new Date(end * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+        : fmt(end);
+      return `发生：${fmt(start)}-${endText}`;
+    }
+    return `发生：${fmt(start)}`;
+  }
+  return created > 0 ? `记录：${fmt(created)}` : '';
+}
+
 function chatroomDraftKeywords(value) {
   if (!value) return [];
   if (Array.isArray(value)) return value;
@@ -3681,30 +3772,193 @@ function chatroomDraftKeywords(value) {
   }
 }
 
-function renderChatroomCompressItem(item, kindLabel) {
+function chatroomDraftBatches() {
+  return chatroomDailyCompressReview?.payload?.chatroom?.batches || [];
+}
+
+function chatroomDraftCoveredSet(batch) {
+  const ids = new Set(batch.covered_ids || []);
+  (batch.discard_memory_ids || []).forEach(id => ids.add(id));
+  ['compressed_daily', 'important_memories'].forEach(field => {
+    (batch[field] || []).forEach(item => (item.source_memory_ids || []).forEach(id => ids.add(id)));
+  });
+  return ids;
+}
+
+function refreshChatroomDraftBatch(batch) {
+  const oldIds = new Set((batch.old_rows || []).map(row => row.id).filter(Boolean));
+  const covered = Array.from(chatroomDraftCoveredSet(batch)).filter(id => !oldIds.size || oldIds.has(id));
+  batch.covered_ids = covered;
+  batch.remaining = Math.max(0, Number(batch.input_count || 0) - covered.length);
+}
+
+function refreshChatroomDraftPayload() {
+  chatroomDraftBatches().forEach(refreshChatroomDraftBatch);
+}
+
+function setChatroomDraftItemValue(batchIndex, field, itemIndex, prop, value) {
+  const item = chatroomDraftBatches()?.[batchIndex]?.[field]?.[itemIndex];
+  if (!item) return;
+  if (prop === 'keywords') item[prop] = chatroomDraftKeywords(value);
+  else if (prop === 'importance' || prop === 'compression_stage') item[prop] = Number(value || 0);
+  else item[prop] = value;
+}
+
+function removeChatroomDraftItem(batchIndex, field, itemIndex) {
+  const items = chatroomDraftBatches()?.[batchIndex]?.[field];
+  if (!items) return;
+  items.splice(itemIndex, 1);
+  refreshChatroomDraftPayload();
+  renderChatroomCompressionReview();
+}
+
+function addChatroomDraftItem(field) {
+  const batches = chatroomDraftBatches();
+  if (!batches.length) return;
+  const batch = batches[0];
+  const now = Math.floor(Date.now() / 1000);
+  batch[field] = batch[field] || [];
+  batch[field].push({
+    content: '',
+    source_memory_ids: [],
+    source_msg_ids: [],
+    keywords: [],
+    importance: field === 'important_memories' ? 0.8 : 0.25,
+    memory_time: batch.old_rows?.[0]?.source_start_ts || batch.old_rows?.[0]?.created_at || now,
+    source_start_ts: batch.old_rows?.[0]?.source_start_ts || batch.old_rows?.[0]?.created_at || now,
+    source_end_ts: batch.old_rows?.[0]?.source_end_ts || batch.old_rows?.[0]?.created_at || now,
+    memory_kind: field === 'important_memories' ? 'long_term' : 'daily',
+    memory_type: field === 'important_memories' ? 'important' : 'daily',
+    compression_stage: field === 'important_memories' ? 0 : Number(batch.output_stage || 1),
+    retain_source_detail: batch.retain_source_detail ?? (Number(batch.output_stage || 1) < 3),
+    reason: '用户手动添加',
+    room_id: currentRoom?.id || 'connor_unified',
+    scope: 'connor'
+  });
+  renderChatroomCompressionReview();
+}
+
+function setChatroomOldRowCovered(batchIndex, memId, covered) {
+  const batch = chatroomDraftBatches()?.[batchIndex];
+  if (!batch || !memId) return;
+  batch.discard_memory_ids = (batch.discard_memory_ids || []).filter(id => id !== memId);
+  batch.covered_ids = (batch.covered_ids || []).filter(id => id !== memId);
+  if (covered) {
+    batch.discard_memory_ids.push(memId);
+  } else {
+    ['compressed_daily', 'important_memories'].forEach(field => {
+      (batch[field] || []).forEach(item => {
+        item.source_memory_ids = (item.source_memory_ids || []).filter(id => id !== memId);
+      });
+    });
+  }
+  refreshChatroomDraftBatch(batch);
+  renderChatroomCompressionReview();
+}
+
+async function saveChatroomDailyCompressionDraft(silent = false) {
+  if (!chatroomDailyCompressReview?.id) return null;
+  refreshChatroomDraftPayload();
+  const result = await memoryCompressionApi('PATCH', `/api/memories/compress-daily/${chatroomDailyCompressReview.id}`, {
+    payload: chatroomDailyCompressReview.payload
+  });
+  if (!result.ok) throw new Error(result.message || '保存草稿失败');
+  chatroomDailyCompressReview = result.review || chatroomDailyCompressReview;
+  renderChatroomCompressionReview();
+  if (!silent) toast(result.message || '压缩草稿已保存');
+  return result;
+}
+
+function renderChatroomCompressItem(item, kindLabel, batchIndex, field, itemIndex) {
   const kws = chatroomDraftKeywords(item.keywords);
   const sourceCount = (item.source_memory_ids || []).length;
   return `<div class="chatroom-compress-item">
-    <div>${esc(item.content || '')}</div>
     <div class="chatroom-compress-meta">
       <span>${esc(kindLabel)}</span>
+      <span>stage ${Number(item.compression_stage || 0)}</span>
       <span>${esc(chatroomDraftTime(item.memory_time || item.source_start_ts))}</span>
       <span>来源 ${sourceCount} 条日常</span>
       <span>重要度 ${Number(item.importance || 0).toFixed(2)}</span>
       ${kws.length ? `<span>${kws.map(k => esc(k)).join(' · ')}</span>` : ''}
     </div>
-    ${item.reason ? `<div class="chatroom-compress-meta">${esc(item.reason)}</div>` : ''}
+    <div class="chatroom-compress-edit">
+      <textarea oninput="setChatroomDraftItemValue(${batchIndex},'${field}',${itemIndex},'content',this.value)">${esc(item.content || '')}</textarea>
+      <div class="chatroom-compress-edit-row">
+        <input value="${esc(kws.join(', '))}" placeholder="关键词" oninput="setChatroomDraftItemValue(${batchIndex},'${field}',${itemIndex},'keywords',this.value)">
+        <input type="number" min="0" max="1" step="0.05" value="${Number(item.importance || 0).toFixed(2)}" oninput="setChatroomDraftItemValue(${batchIndex},'${field}',${itemIndex},'importance',this.value)">
+        <input type="number" min="0" max="4" step="1" value="${Number(item.compression_stage || 0)}" oninput="setChatroomDraftItemValue(${batchIndex},'${field}',${itemIndex},'compression_stage',this.value)">
+      </div>
+      <input value="${esc(item.reason || '')}" placeholder="理由/证据摘要" oninput="setChatroomDraftItemValue(${batchIndex},'${field}',${itemIndex},'reason',this.value);setChatroomDraftItemValue(${batchIndex},'${field}',${itemIndex},'evidence_summary',this.value)">
+      <div class="chatroom-compress-mini"><button onclick="removeChatroomDraftItem(${batchIndex},'${field}',${itemIndex})">删除这条</button></div>
+    </div>
   </div>`;
 }
 
-function renderChatroomOldCompressItem(item) {
+function renderChatroomOldCompressItem(item, batchIndex, covered) {
   return `<div class="chatroom-compress-item">
-    <div>${esc(item.content || '')}</div>
-    <div class="chatroom-compress-meta">
-      <span>${esc(chatroomDraftTime(item.source_start_ts || item.created_at))}</span>
-      <span>重要度 ${Number(item.importance || 0).toFixed(2)}</span>
-    </div>
+    <label class="chatroom-compress-old-toggle">
+      <input type="checkbox" ${covered ? 'checked' : ''} onchange="setChatroomOldRowCovered(${batchIndex},'${esc(item.id)}',this.checked)">
+      <div>
+        <div>${esc(item.content || '')}</div>
+        <div class="chatroom-compress-meta">
+          <span>${esc(chatroomDraftTime(item.source_start_ts || item.created_at))}</span>
+          <span>stage ${Number(item.compression_stage || 0)}</span>
+          <span>重要度 ${Number(item.importance || 0).toFixed(2)}</span>
+          <span>${covered ? '确认后压缩/移除旧条目' : '保留这条旧记忆'}</span>
+        </div>
+      </div>
+    </label>
   </div>`;
+}
+
+function renderChatroomDraftItems(field, label) {
+  return chatroomDraftBatches().map((batch, batchIndex) => {
+    const items = batch[field] || [];
+    return items.map((item, itemIndex) => renderChatroomCompressItem(
+      item,
+      `${label} · ${batch.tier_label || batch.compression_tier || 'stage'}`,
+      batchIndex,
+      field,
+      itemIndex
+    )).join('');
+  }).join('');
+}
+
+function renderChatroomOldRows() {
+  return chatroomDraftBatches().map((batch, batchIndex) => {
+    const covered = chatroomDraftCoveredSet(batch);
+    return (batch.old_rows || []).map(row => renderChatroomOldCompressItem(row, batchIndex, covered.has(row.id))).join('');
+  }).join('');
+}
+
+function chatroomDraftItemCount(field) {
+  return chatroomDraftBatches().reduce((sum, batch) => sum + ((batch[field] || []).length), 0);
+}
+
+function chatroomOldRowCount() {
+  return chatroomDraftBatches().reduce((sum, batch) => sum + ((batch.old_rows || []).length), 0);
+}
+
+function chatroomCompressionWarnings() {
+  const warnings = [];
+  chatroomDraftBatches().forEach(batch => {
+    const input = Number(batch.input_count || 0);
+    if (!input) return;
+    const processed = chatroomDraftCoveredSet(batch).size;
+    const created = (batch.compressed_daily || []).length + (batch.important_memories || []).length;
+    const ratio = processed / input;
+    const label = batch.tier_label || batch.compression_tier || '未命名档位';
+    if (batch.compression_tier === 'recent' && ratio > 0.4) {
+      warnings.push(`${label} 拟移除 ${processed}/${input} 条，近期记忆可能压得过狠。`);
+    }
+    if (batch.compression_tier === 'recent' && input >= 5 && created === 0) {
+      warnings.push(`${label} 没有生成新记忆，请确认不是误删近期内容。`);
+    }
+    if (batch.compression_tier === 'archive' && (batch.compressed_daily || []).length > 1) {
+      warnings.push(`${label} 生成了较多普通日常，事实档案层建议只保留重大事实。`);
+    }
+  });
+  return warnings;
 }
 
 function renderChatroomCompressionReview() {
@@ -3717,13 +3971,14 @@ function renderChatroomCompressionReview() {
   }
   const counts = chatroomDailyCompressReview.counts || {};
   const chat = counts.chatroom || {};
-  const dailyItems = flattenChatroomDraft('compressed_daily');
-  const importantItems = flattenChatroomDraft('important_memories');
-  const oldRows = chatroomDraftOldRows();
+  const dailyCount = chatroomDraftItemCount('compressed_daily');
+  const importantCount = chatroomDraftItemCount('important_memories');
+  const oldRowCount = chatroomOldRowCount();
   const messages = (chat.messages || []).filter(Boolean);
   const errors = (chat.errors || []).filter(Boolean);
+  const warnings = chatroomCompressionWarnings();
   const canApply = chatroomDailyCompressReview.status === 'draft'
-    && (dailyItems.length || importantItems.length || Number(chat.processed || 0));
+    && (dailyCount || importantCount || Number(chat.processed || 0));
   el.style.display = 'block';
   el.innerHTML = `
     <div class="chatroom-compress-head">
@@ -3737,20 +3992,26 @@ function renderChatroomCompressionReview() {
       <span>新长期重要 ${Number(chat.created_important || 0)}</span>
     </div>
     ${messages.length ? `<div class="chatroom-compress-msg">${esc(messages.join('\n'))}</div>` : ''}
+    ${warnings.length ? `<div class="chatroom-compress-msg" style="color:#ad6800;">${esc(warnings.join('\n'))}</div>` : ''}
     ${errors.length ? `<div class="chatroom-compress-msg" style="color:var(--danger);">${esc(errors.join('\n'))}</div>` : ''}
+    <div class="chatroom-compress-mini">
+      <button onclick="addChatroomDraftItem('compressed_daily')">新增日常</button>
+      <button onclick="addChatroomDraftItem('important_memories')">新增长期重要</button>
+    </div>
     <details open>
-      <summary>新日常 ${dailyItems.length}</summary>
-      ${dailyItems.length ? dailyItems.map(item => renderChatroomCompressItem(item, '日常')).join('') : '<div class="mem-empty">没有新日常</div>'}
+      <summary>新日常 ${dailyCount}</summary>
+      ${dailyCount ? renderChatroomDraftItems('compressed_daily', '日常') : '<div class="mem-empty">没有新日常</div>'}
     </details>
-    <details ${importantItems.length ? 'open' : ''}>
-      <summary>新长期重要 ${importantItems.length}</summary>
-      ${importantItems.length ? importantItems.map(item => renderChatroomCompressItem(item, '长期重要')).join('') : '<div class="mem-empty">没有新长期重要</div>'}
+    <details ${importantCount ? 'open' : ''}>
+      <summary>新长期重要 ${importantCount}</summary>
+      ${importantCount ? renderChatroomDraftItems('important_memories', '长期重要') : '<div class="mem-empty">没有新长期重要</div>'}
     </details>
     <details>
-      <summary>将移除的旧日常 ${oldRows.length}</summary>
-      ${oldRows.length ? oldRows.slice(0, 120).map(renderChatroomOldCompressItem).join('') : '<div class="mem-empty">没有旧日常会被移除</div>'}
+      <summary>旧日常处理 ${oldRowCount}</summary>
+      ${oldRowCount ? renderChatroomOldRows() : '<div class="mem-empty">没有旧日常会被处理</div>'}
     </details>
     <div class="chatroom-compress-actions">
+      <button class="chatroom-compress-discard" onclick="saveChatroomDailyCompressionDraft(false)">保存草稿</button>
       <button class="chatroom-compress-discard" onclick="discardChatroomDailyCompressionDraft('${esc(chatroomDailyCompressReview.id)}')">废弃草稿</button>
       <button class="chatroom-compress-apply" onclick="applyChatroomDailyCompressionDraft('${esc(chatroomDailyCompressReview.id)}')" ${canApply ? '' : 'disabled'}>确认应用</button>
     </div>`;
@@ -3769,7 +4030,7 @@ async function compressChatroomDailyMemories() {
     toast('已经有一份聊天室压缩草稿，先确认应用或废弃它');
     return;
   }
-  if (!confirm('将为聊天室记忆库中超过 14 天的日常记忆生成压缩草稿；这一步不会修改记忆库。继续？')) return;
+  if (!confirm('将按 15-90 天、90-180 天、180-365 天、365 天以上分阶段生成聊天室压缩草稿；这一步不会修改记忆库。继续？')) return;
   const btn = document.getElementById('chatroomCompressDailyBtn');
   if (btn) {
     btn.disabled = true;
@@ -3777,7 +4038,7 @@ async function compressChatroomDailyMemories() {
   }
   toast('正在生成聊天室压缩草稿...');
   try {
-    const result = await memoryCompressionApi('POST', '/api/memories/compress-daily', { target: 'chatroom', days: 14 });
+    const result = await memoryCompressionApi('POST', '/api/memories/compress-daily', { target: 'chatroom', days: 15 });
     chatroomDailyCompressReview = result.review || null;
     renderChatroomCompressionReview();
     toast(result.message || '聊天室压缩草稿已生成', 3000);
@@ -3796,8 +4057,9 @@ async function applyChatroomDailyCompressionDraft(reviewId) {
   const chat = chatroomDailyCompressReview?.counts?.chatroom || {};
   if (!confirm(`确认应用这份聊天室压缩草稿？将移除旧日常 ${Number(chat.processed || 0)} 条，并写入新日常 ${Number(chat.created_daily || 0)} 条、新长期重要 ${Number(chat.created_important || 0)} 条。`)) return;
   setChatroomCompressionBusy(true);
-  toast('正在应用聊天室压缩草稿...');
+  toast('正在保存并应用聊天室压缩草稿...');
   try {
+    await saveChatroomDailyCompressionDraft(true);
     const result = await memoryCompressionApi('POST', `/api/memories/compress-daily/${reviewId}/apply`);
     if (!result.ok) throw new Error(result.message || '应用失败');
     chatroomDailyCompressReview = null;
@@ -3845,43 +4107,92 @@ function restoreChatroomMemoryPosition(memId) {
   });
 }
 
+function chatroomMemoryKind(m) {
+  return m?.memory_kind === 'daily' ? 'daily' : 'long_term';
+}
+
+function setChatroomMemoryKindFilter(kind) {
+  chatroomMemoryKindFilter = kind || 'all';
+  document.querySelectorAll('.memory-tab').forEach(btn => {
+    const active = btn.dataset.kind === chatroomMemoryKindFilter;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  renderChatroomMemories();
+}
+
+function filterChatroomMemories() {
+  renderChatroomMemories();
+}
+
+function renderChatroomMemories(focusMemId = '') {
+  const memListEl = document.getElementById('memList');
+  const countBadge = document.getElementById('memCountBadge');
+  const query = (document.getElementById('memSearch')?.value || '').trim().toLowerCase();
+  const all = Array.isArray(chatroomMemoryCache) ? chatroomMemoryCache : [];
+  const kindFiltered = chatroomMemoryKindFilter === 'all'
+    ? all
+    : all.filter(m => chatroomMemoryKind(m) === chatroomMemoryKindFilter);
+  const filtered = query
+    ? kindFiltered.filter(m => {
+      const kindLabel = m.memory_kind_label || (chatroomMemoryKind(m) === 'daily' ? '日常' : '长期重要');
+      return String(m.content || '').toLowerCase().includes(query)
+        || String(m.keywords || '').toLowerCase().includes(query)
+        || kindLabel.includes(query);
+    })
+    : kindFiltered;
+  const filterText = chatroomMemoryKindFilter === 'daily' ? '日常' : (chatroomMemoryKindFilter === 'long_term' ? '长期重要' : '');
+  if (countBadge) {
+    countBadge.textContent = `共 ${all.length} 条`
+      + (filterText ? `，${filterText} ${kindFiltered.length} 条` : '')
+      + ((query || filterText) ? `，当前显示 ${filtered.length} 条` : '');
+  }
+  if (!all.length) {
+    memListEl.innerHTML = '<div class="mem-empty">暂无记忆，可手动添加或总结生成</div>';
+    return;
+  }
+  if (!filtered.length) {
+    memListEl.innerHTML = '<div class="mem-empty">没有匹配的记忆</div>';
+    return;
+  }
+  memListEl.innerHTML = filtered.map(m => {
+    const date = crFormatMemoryOccurrence(m);
+    const kw = m.keywords ? `关键词: ${esc(m.keywords)}` : '';
+    const hasSource = Number(m.source_count || 0) > 0;
+    const kindLabel = m.memory_kind_label || (chatroomMemoryKind(m) === 'daily' ? '日常' : '长期重要');
+    const kindClass = chatroomMemoryKind(m) === 'daily' ? 'daily' : 'long-term';
+    const unresolved = Boolean(m.unresolved);
+    return `
+      <div class="mem-item${unresolved ? ' mem-unresolved' : ''}" data-id="${m.id}">
+        <div class="mem-head">
+          <span class="mem-kind ${kindClass}">${esc(kindLabel)}</span>
+          <div class="mem-content">${esc(m.content)}</div>
+          <div class="mem-actions">
+            <button class="mem-pin${unresolved ? ' active' : ''}" onclick="toggleChatroomMemoryUnresolved('${m.id}')" title="${unresolved ? '取消未完成标记' : '标记为未完成'}">📌</button>
+            ${hasSource ? `<button onclick="viewMemSource('${m.id}')" title="查看原文">📜</button>` : ''}
+            <button onclick="editMemory('${m.id}')" title="编辑">✏️</button>
+            <button class="del" onclick="deleteMemory('${m.id}')" title="删除">✕</button>
+          </div>
+        </div>
+        <div class="mem-meta">
+          ${date ? `<span>${esc(date)}</span>` : ''}
+          <span>重要度: ${m.importance}</span>
+          ${kw ? `<span>${kw}</span>` : ''}
+        </div>
+      </div>`;
+  }).join('');
+  restoreChatroomMemoryPosition(focusMemId);
+}
+
 async function loadMemories(focusMemId = '') {
   if (!currentRoom) return;
   const memListEl = document.getElementById('memList');
   try {
     const mems = await api(`/rooms/${currentRoom.id}/memories`);
-    const countBadge = document.getElementById('memCountBadge');
-    if (countBadge) countBadge.textContent = `共 ${Array.isArray(mems) ? mems.length : 0} 条`;
-    if (!Array.isArray(mems) || !mems.length) {
-      memListEl.innerHTML = '<div class="mem-empty">暂无记忆，可手动添加或总结生成</div>';
-      return;
-    }
-    memListEl.innerHTML = mems.map(m => {
-      const date = new Date(m.created_at * 1000).toLocaleDateString();
-      const kw = m.keywords ? `关键词: ${esc(m.keywords)}` : '';
-      const hasSource = Number(m.source_count || 0) > 0;
-      const kindLabel = m.memory_kind_label || (m.memory_kind === 'daily' ? '日常' : '长期重要');
-      const kindClass = m.memory_kind === 'daily' ? 'daily' : 'long-term';
-      return `
-        <div class="mem-item" data-id="${m.id}">
-          <div class="mem-head">
-            <span class="mem-kind ${kindClass}">${esc(kindLabel)}</span>
-            <div class="mem-content">${esc(m.content)}</div>
-          </div>
-          <div class="mem-meta">
-            <span>${date}</span>
-            <span>重要度: ${m.importance}</span>
-            ${kw ? `<span>${kw}</span>` : ''}
-            <div class="mem-actions">
-              ${hasSource ? `<button onclick="viewMemSource('${m.id}')" title="查看原文">📜</button>` : ''}
-              <button onclick="editMemory('${m.id}')" title="编辑">✏️</button>
-              <button class="del" onclick="deleteMemory('${m.id}')" title="删除">✕</button>
-            </div>
-          </div>
-        </div>`;
-    }).join('');
-    restoreChatroomMemoryPosition(focusMemId);
+    chatroomMemoryCache = Array.isArray(mems) ? mems : [];
+    renderChatroomMemories(focusMemId);
   } catch (err) {
+    chatroomMemoryCache = [];
     memListEl.innerHTML = `<div class="mem-empty">加载失败: ${err.message}</div>`;
   }
 }
@@ -3902,8 +4213,12 @@ function hideMemForm() {
 }
 
 async function editMemory(memId) {
-  const mems = await api(`/rooms/${currentRoom.id}/memories`);
-  const mem = (Array.isArray(mems) ? mems : []).find(m => m.id === memId);
+  let mem = chatroomMemoryCache.find(m => m.id === memId);
+  if (!mem) {
+    const mems = await api(`/rooms/${currentRoom.id}/memories`);
+    chatroomMemoryCache = Array.isArray(mems) ? mems : [];
+    mem = chatroomMemoryCache.find(m => m.id === memId);
+  }
   if (!mem) { toast('找不到该记忆'); return; }
 
   document.getElementById('memEditId').value = memId;
@@ -3953,6 +4268,21 @@ async function deleteMemory(memId) {
   await api(`/memories/${memId}`, { method: 'DELETE' });
   toast('已删除');
   loadMemories();
+}
+
+async function toggleChatroomMemoryUnresolved(memId) {
+  try {
+    const result = await api(`/memories/${memId}/unresolved`, { method: 'PATCH' });
+    if (!result?.ok) {
+      toast(result?.message || '切换未完成状态失败');
+      return;
+    }
+    const mem = chatroomMemoryCache.find(item => item.id === memId);
+    if (mem) mem.unresolved = result.unresolved;
+    renderChatroomMemories(memId);
+  } catch (err) {
+    toast('切换未完成状态失败: ' + err.message);
+  }
 }
 
 async function viewMemSourceLegacy(memId) {
@@ -4029,7 +4359,7 @@ function renderMemSourceSelection() {
 function updateMemSourceSummary() {
   const total = memSourceMessages.length;
   const kept = memSourceMessages.filter(m => m.selected).length;
-  document.getElementById('memSourceSummary').textContent = `将保留 ${kept}/${total} 条原文作为这条记忆的证据；点击保存前不会写入数据库。`;
+  document.getElementById('memSourceSummary').textContent = `将保留 ${kept}/${total} 条原文挂载到这条记忆；点击保存前不会写入数据库。`;
 }
 
 function toggleMemSourceMsg(index, checked) {
@@ -4101,11 +4431,20 @@ backdrop.addEventListener('click', closeSidebar);
 // ══════════════════════════════════════════════════
 
 function goHome() {
-  window.location.href = '/';
+  if (window.parent !== window && typeof window.parent.navigateToHome === 'function') {
+    window.parent.navigateToHome();
+  } else {
+    window.location.href = '/';
+  }
 }
 
 function crOpenDiary() {
-  window.location.href = '/diary';
+  const diaryUrl = '/diary?return=%2Fchatroom';
+  if (window.parent !== window && typeof window.parent.openSubPage === 'function') {
+    window.parent.openSubPage(diaryUrl);
+  } else {
+    window.location.href = diaryUrl;
+  }
 }
 
 function renderEmptyChat() {
@@ -4156,6 +4495,13 @@ function connectWS() {
         crHandleDebug(data);
       }
 
+      if (data.type === 'chatroom_ai_status' && currentRoom) {
+        const d = data.data || {};
+        if (d.room_id === currentRoom.id) {
+          updateTypingStatus(crName(d.sender || 'aion'), d.text || '处理中...');
+        }
+      }
+
       if (data.type === 'ambient_voice_listener' && data.data) {
         crAmbientApplyListenerState(data.data);
       }
@@ -4202,6 +4548,12 @@ function connectWS() {
             row.replaceWith(div.firstElementChild);
           }
         }
+      }
+
+      if (data.type === 'wish_updated' && data.data) {
+        document.querySelectorAll('.wish-fulfill-card').forEach(card => {
+          if (card.dataset.wishId === data.data.id) crApplyWishCardStatus(card, data.data.status || 'active');
+        });
       }
 
       if (data.type === 'chatroom_room_created' || data.type === 'chatroom_room_deleted' || data.type === 'chatroom_room_updated') {
@@ -5517,9 +5869,15 @@ function crToyCloseEditor() { document.getElementById('crToyEditorOverlay').clas
 // ══════════════════════════════════════════════════
 
 (async function init() {
-  // 从服务端加载 TTS 配置，所有窗口共享同一份
+  // Start independent Cloudflare requests together. Only the message request
+  // must wait for the room list, reducing startup from many round trips to two.
+  const configPromise = api('/config');
+  const roomPromise = api('/rooms');
+  const listenerPromise = crAmbientRefreshListenerState().catch(() => null);
+  const modelPromise = fetchCurrentModel(configPromise);
+
   try {
-    const cfg = await api('/config');
+    const cfg = await configPromise;
     applyChatroomNames(cfg);
     crTtsEnabled = !!cfg.tts_enabled;
     crTtsAionVoice = cfg.tts_aion_voice || '';
@@ -5527,10 +5885,16 @@ function crToyCloseEditor() { document.getElementById('crToyEditorOverlay').clas
     chatroomConnorModel = cfg.connor_model || 'Codex';
     chatroomReplyOrder = cfg.reply_order || 'random';
     crApplyAmbientVoiceConfig(cfg);
-    await crAmbientRefreshListenerState();
   } catch(e) {}
-  await fetchCurrentModel();
-  await loadRooms();
+  await listenerPromise;
+  await modelPromise;
+  try {
+    rooms = await roomPromise;
+    renderRoomList();
+  } catch(e) {
+    rooms = [];
+    renderRoomList();
+  }
   const initParams = new URLSearchParams(location.search);
   const targetRoomId = initParams.get('room');
   const targetMsgId = initParams.get('msg');

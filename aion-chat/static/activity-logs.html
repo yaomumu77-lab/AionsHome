@@ -71,6 +71,7 @@
 }
 .log-device.pc { background:#e3f2fd; color:#1565c0; }
 .log-device.phone { background:#e8f5e9; color:#2e7d32; }
+.log-device.home { background:#fff3e0; color:#b45309; }
 
 .log-body { flex:1; min-width:0; }
 .log-time { color:var(--text2); font-size:11px; font-family:monospace; margin-right:6px; }
@@ -303,7 +304,10 @@ function switchActivityTab(tab) {
   $('tabTimeline').classList.toggle('active', tab === 'timeline');
   $('logsPane').classList.toggle('active', tab === 'logs');
   $('timelinePane').classList.toggle('active', tab === 'timeline');
-  if (tab === 'timeline' && !timelineLoaded) loadTimeline();
+  if (tab === 'timeline') {
+    if (!timelineLoaded) loadTimeline();
+    else scrollTimelineToBottom();
+  }
 }
 
 function timelineDate(ts) {
@@ -403,6 +407,21 @@ document.addEventListener('pointerdown', event => {
   hideTimelinePopover();
 });
 
+function scrollElementToBottom(el) {
+  if (!el) return;
+  const apply = () => { el.scrollTop = el.scrollHeight; };
+  apply();
+  requestAnimationFrame(() => {
+    apply();
+    setTimeout(apply, 80);
+    setTimeout(apply, 250);
+  });
+}
+
+function scrollTimelineToBottom() {
+  scrollElementToBottom($('timelineList'));
+}
+
 async function loadTimeline() {
   const hours = $('timelineHours').value;
   const el = $('timelineList');
@@ -411,7 +430,7 @@ async function loadTimeline() {
     const data = await api('GET', `/api/timeline?hours=${hours}&limit=500`);
     timelineLoaded = true;
     renderTimeline(data.items || []);
-    el.scrollTop = el.scrollHeight;
+    scrollTimelineToBottom();
   } catch(e) {
     el.innerHTML = '<div class="timeline-empty">加载失败</div>';
   }
@@ -420,13 +439,15 @@ async function loadTimeline() {
 /* ── WebSocket 实时推送 ── */
 connectCommonWS(msg => {
   if (msg.type === 'activity_log' && msg.data) {
+    if (msg.data.device === 'home' && currentActivityTab === 'timeline') {
+      loadTimeline();
+    }
     // 仅在"最近"模式下实时追加
     if ($('viewMode').value === 'recent') {
       allEntries.push(msg.data);
       renderEntries();
       // 自动滚到底部
-      const el = $('logList');
-      el.scrollTop = el.scrollHeight;
+      scrollElementToBottom($('logList'));
     }
   }
   if (msg.type === 'idle_event' && currentActivityTab === 'timeline') {
@@ -460,7 +481,7 @@ async function loadRecent() {
     const data = await api('GET', '/api/activity/recent');
     allEntries = data.entries || [];
     renderEntries();
-    const el = $('logList'); el.scrollTop = el.scrollHeight;
+    scrollElementToBottom($('logList'));
   } catch(e) {
     $('logList').innerHTML = '<div class="log-empty">加载失败</div>';
   }
@@ -491,7 +512,7 @@ async function loadByDate() {
     const data = await api('GET', `/api/activity/logs/${date}`);
     allEntries = data.entries || [];
     renderEntries();
-    const el = $('logList'); el.scrollTop = el.scrollHeight;
+    scrollElementToBottom($('logList'));
   } catch(e) {
     $('logList').innerHTML = '<div class="log-empty">加载失败</div>';
   }
@@ -506,9 +527,11 @@ function renderEntries() {
   // 统计
   const pcCount = allEntries.filter(e => e.device === 'pc').length;
   const phoneCount = allEntries.filter(e => e.device === 'phone').length;
+  const homeCount = allEntries.filter(e => e.device === 'home').length;
   $('statsBar').innerHTML = `
     <span class="stat-item"><span class="stat-dot pc"></span> PC: ${pcCount} 条</span>
     <span class="stat-item"><span class="stat-dot phone"></span> 手机: ${phoneCount} 条</span>
+    <span class="stat-item">家庭: ${homeCount} 条</span>
     <span class="stat-item">共 ${allEntries.length} 条</span>
   `;
 
@@ -519,8 +542,18 @@ function renderEntries() {
   }
 
   el.innerHTML = filtered.map(e => {
-    const deviceCls = e.device === 'pc' ? 'pc' : 'phone';
-    const deviceLabel = e.device === 'pc' ? 'PC' : '📱';
+    const deviceCls = e.device === 'pc' ? 'pc' : (e.device === 'home' ? 'home' : 'phone');
+    const deviceLabel = e.device === 'pc' ? 'PC' : (e.device === 'home' ? '家' : '📱');
+    if (e.device === 'home') {
+      return `<div class="log-entry">
+        <span class="log-device ${deviceCls}">${deviceLabel}</span>
+        <div class="log-body">
+          <span class="log-time">${escHtml(e.time || '')}</span>
+          <span class="log-app">${escHtml(e.title || '家庭传感器动态')}</span>
+          ${e.detail ? `<div class="log-title">${escHtml(e.detail)}</div>` : ''}
+        </div>
+      </div>`;
+    }
     // PC: 显示窗口标题；手机: 如果 title 是包名就不显示
     const isPackageName = e.title && e.title.includes('.') && !e.title.includes(' ');
     const showTitle = e.title && !isPackageName && e.title !== e.app;
