@@ -651,28 +651,117 @@ def _fallback_digest_topic(text: str, keywords: list[str]) -> str:
     return "当前闲聊话题"
 
 
-async def instant_digest(recent_messages: list[dict]) -> dict:
+_GROUP_ROUTING_META_PHRASES = (
+    "first_responder",
+    "优先回复对象",
+    "回复判断",
+    "回复路由",
+    "哨兵判断",
+    "查询优化路由",
+    "谁先回复",
+    "由谁先回复",
+    "下一条ai回复",
+    "下一条 AI 回复",
+    "发言顺序",
+)
+
+
+def _sanitize_group_recall_fields(
+    topic: str,
+    keywords: list[str],
+    participant_names: dict[str, str],
+    latest_user: str,
+) -> tuple[str, list[str]]:
+    """Keep group reply-routing metadata out of vector recall inputs."""
+    blocked_names = {
+        str(participant_names.get(key) or "").strip()
+        for key in ("user", "aion", "connor")
+    }
+    blocked_names.update({"aion", "connor"})
+    blocked_names.discard("")
+
+    def _contains_blocked_name(text: str) -> bool:
+        lowered = text.casefold()
+        return any(name.casefold() in lowered for name in blocked_names)
+
+    cleaned_keywords = []
+    for keyword in keywords or []:
+        value = str(keyword or "").strip()
+        lowered = value.casefold()
+        if not value or _contains_blocked_name(value):
+            continue
+        if value == "哨兵" or any(phrase.casefold() in lowered for phrase in _GROUP_ROUTING_META_PHRASES):
+            continue
+        cleaned_keywords.append(value)
+
+    topic_text = str(topic or "").strip()
+    topic_lowered = topic_text.casefold()
+    has_routing_meta = any(
+        phrase.casefold() in topic_lowered
+        for phrase in _GROUP_ROUTING_META_PHRASES
+    )
+    if has_routing_meta:
+        topic_text = ""
+    else:
+        for name in sorted(blocked_names, key=len, reverse=True):
+            topic_text = re.sub(re.escape(name), "", topic_text, flags=re.IGNORECASE)
+        topic_text = re.sub(r"[\s、,，;；:：/|]+", " ", topic_text).strip(" -—_")
+
+    if not topic_text:
+        topic_text = _fallback_digest_topic(latest_user, cleaned_keywords)
+    return topic_text, cleaned_keywords
+
+
+async def instant_digest(
+    recent_messages: list[dict],
+    group_participants: dict[str, str] | None = None,
+) -> dict:
     """
     用户每次发消息后即时调用 flash-lite，返回结构化 JSON：
-    {is_search_needed, keywords, require_detail, status}
+    {is_search_needed, keywords, require_detail, status, topic, first_responder}
+
+    group_participants 仅在群聊传入，键为 user/aion/connor，值为动态配置的显示名。
+    此时 first_responder 返回 aion/connor/random，用于决定本轮谁先回复。
     """
     gemini_key = get_key("gemini_free")
     scfg = get_sentinel_config()
     if not scfg["api_key"] or not recent_messages:
-        return {"is_search_needed": False, "keywords": [], "require_detail": False, "status": "", "topic": ""}
+        return {
+            "is_search_needed": False, "keywords": [], "require_detail": False,
+            "status": "", "topic": "", "first_responder": "random",
+        }
 
     wb = load_worldbook()
     user_name = wb.get("user_name", "用户")
     ai_name = wb.get("ai_name", "AI")
 
-    messages_text = "\n".join([
-        f"{user_name if m['role']=='user' else ai_name}: {m['content'][:200]}"
+    participant_names = group_participants or {}
+
+    def _speaker_label(message: dict) -> str:
+        sender = str(message.get("sender") or "").strip().lower()
+        if sender and sender in participant_names:
+            return participant_names[sender]
+        return user_name if message.get("role") == "user" else ai_name
+
+    messages_text = "\n".join(
+        f"{_speaker_label(m)}: {str(m.get('content') or '')[:200]}"
         for m in recent_messages
-    ])
+    )
+
+    responder_instruction = ""
+    if group_participants:
+        group_ai_name = participant_names.get("aion") or ai_name
+        group_connor_name = participant_names.get("connor") or "另一位AI"
+        responder_instruction = (
+            f'7. "first_responder": 只根据最新一条用户消息判断下一条应由谁先回复。'
+            f'明确在问或点名“{group_ai_name}”就填"aion"，'
+            f'明确在问或点名“{group_connor_name}”就填"connor"；'
+            f'同时问两人、没有明确对象或拿不准就填"random"。注意否定语义。\n'
+        )
 
     prompt = (
         f"你是一个 RAG 系统的查询优化路由。分析用户输入，输出 JSON：\n"
-        f"1. 忽略高频对话称呼：不要提取对话者的名字或昵称（如 \"{ai_name}\", \"{user_name}\", \"小鬣狗\", \"老公\", \"宝贝\"）作为关键词。\n"
+        f"1. 忽略高频对话称呼：不要提取对话者的名字或昵称（如 \"{ai_name}\", \"{user_name}\", \"亲爱的\", \"老公\", \"宝贝\"）作为关键词。\n"
         f"2. 忽略高频常用词：如\"晚安故事\",\"吃什么\"等。\n"
         f"3. 聚焦核心实体：只提取稀缺的、具有区分度的名词（地点、物品、特定事件、专有名词等）\n"
         f"4. 判断是否需要搜索记忆。只要用户在问过去发生/看过/聊过/吃过/做过/提过的内容，或需要你回忆上下文事实，is_search_needed 必须为 true。\n"
@@ -685,6 +774,7 @@ async def instant_digest(recent_messages: list[dict]) -> dict:
         f"      - true: 当询问具体事实/细节/名字/剧情/步骤/时间线（需要读取正文）时为 true，例如“前天看的电影讲的啥”“那个叫什么”“具体怎么说的”。\n"
         f"5. \"status\": 结合上下文总结{user_name}当前所处的状态（如：{user_name}刚吃完晚饭准备出门、洗完澡准备睡觉、回到家开始工作了等）。\n"
         f"6. \"topic\": 必须输出一个 8-40 字的检索话题摘要，永远不要留空。不要复制整句原话；要概括成短查询，例如“询问某次看过内容的剧情”“回忆之前提到的食物”等。\n\n"
+        f"{responder_instruction}"
         f"严格只输出一个 JSON 对象，不要输出任何其他内容。\n\n"
         f"对话：\n{messages_text}"
     )
@@ -692,7 +782,10 @@ async def instant_digest(recent_messages: list[dict]) -> dict:
     try:
         raw = await _call_sentinel_text(scfg, prompt, timeout=15)
         if not raw:
-            return {"is_search_needed": False, "keywords": [], "require_detail": False, "status": "", "topic": ""}
+            return {
+                "is_search_needed": False, "keywords": [], "require_detail": False,
+                "status": "", "topic": "", "first_responder": "random",
+            }
 
         # 提取 JSON（可能包裹在 ```json ... ``` 中）
         if "```" in raw:
@@ -708,6 +801,9 @@ async def instant_digest(recent_messages: list[dict]) -> dict:
             keywords = [k.strip() for k in keywords.replace("、", ",").split(",") if k.strip()]
         require_detail = bool(result.get("require_detail", False))
         status = str(result.get("status", "")).strip()
+        first_responder = str(result.get("first_responder", "random")).strip().lower()
+        if first_responder not in ("aion", "connor"):
+            first_responder = "random"
 
         if status:
             save_chat_status(status)
@@ -715,6 +811,13 @@ async def instant_digest(recent_messages: list[dict]) -> dict:
 
         topic = str(result.get("topic", "")).strip()
         latest_user = _latest_user_text(recent_messages)
+        if group_participants:
+            topic, keywords = _sanitize_group_recall_fields(
+                topic,
+                keywords,
+                participant_names,
+                latest_user,
+            )
         if latest_user:
             if _MEMORY_REFERENCE_RE.search(latest_user):
                 is_search = True
@@ -729,9 +832,13 @@ async def instant_digest(recent_messages: list[dict]) -> dict:
             "require_detail": require_detail,
             "status": status,
             "topic": topic,
+            "first_responder": first_responder,
         }
     except Exception:
-        return {"is_search_needed": False, "keywords": [], "require_detail": False, "status": "", "topic": ""}
+        return {
+            "is_search_needed": False, "keywords": [], "require_detail": False,
+            "status": "", "topic": "", "first_responder": "random",
+        }
 
 
 # ── 手动总结：分组提取记忆 ─────────────────────────

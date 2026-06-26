@@ -2,7 +2,7 @@
 朋友圈 API：列表查询、发布、删除、点赞/踩、评论、AI 自动回复
 """
 
-import time, json, asyncio, random
+import time, json, asyncio, random, re
 from typing import Optional, Any
 from datetime import datetime
 
@@ -33,10 +33,37 @@ router = APIRouter(prefix="/api/moments", tags=["moments"])
 def _get_names() -> tuple[str, str, str]:
     """返回 (user_name, ai_name, connor_name)"""
     wb = load_worldbook()
-    user_name = wb.get("user_name", "用户")
-    ai_name = wb.get("ai_name", "AI")
-    connor_name = load_chatroom_config().get("connor_name", "Connor")
+    user_name = wb.get("user_name") or "用户"
+    ai_name = wb.get("ai_name") or "AI"
+    connor_name = load_chatroom_config().get("connor_name") or "AI"
     return user_name, ai_name, connor_name
+
+
+def _parse_moment_reply_result(raw_text: str, *, expect_chat_decision: bool) -> tuple[str, bool, str]:
+    """Parse the model reply while remaining compatible with the old plain-text format."""
+    raw = (raw_text or "").strip()
+    if not expect_chat_decision:
+        return strip_tool_commands(raw).strip(), False, ""
+
+    candidate = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
+    candidate = re.sub(r"\s*```$", "", candidate)
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start >= 0 and end > start:
+        candidate = candidate[start:end + 1]
+
+    try:
+        data = json.loads(candidate)
+    except Exception:
+        data = None
+
+    if not isinstance(data, dict):
+        return strip_tool_commands(raw).strip(), False, ""
+
+    comment = strip_tool_commands(str(data.get("comment") or "")).strip()
+    chat_message = strip_tool_commands(str(data.get("chat_message") or "")).strip()
+    send_chat_message = data.get("send_chat_message") is True and bool(chat_message)
+    return comment, send_chat_message, chat_message
 
 
 def _author_display(author: str) -> str:
@@ -252,7 +279,7 @@ def _build_moment_reply_messages(
             messages.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
 
     if wb.get("user_persona"):
-        messages.append({"role": "user", "content": f"[用户信息]\n{wb['user_persona']}"})
+        messages.append({"role": "user", "content": f"[{user_name}信息]\n{wb['user_persona']}"})
         messages.append({"role": "assistant", "content": "收到。"})
 
     # 2. 最近记忆
@@ -316,12 +343,25 @@ def _build_moment_reply_messages(
             )})
     else:
         moment_author = name_map.get(moment["author"], moment["author"])
-        messages.append({"role": "user", "content": (
-            f"[任务] {moment_author}发了一条朋友圈。"
-            f"请你作为{my_name}，对这条朋友圈写一条简短自然的评论。"
-            f"可以是感想、调侃、鼓励、吐槽等，符合你的性格。"
-            f"直接输出评论内容，不要加任何前缀标记。"
-        )})
+        if moment["author"] == "user":
+            messages.append({"role": "user", "content": (
+                f"[任务] {moment_author}发了一条朋友圈。"
+                f"请你作为{my_name}，先写一条简短自然的朋友圈评论；"
+                f"再根据这条朋友圈的内容，判断你是否还会自然地回到聊天窗口单独对{moment_author}说一句话。"
+                f"聊天消息不能只是机械重复评论，要像你刚看到朋友圈后主动来找TA说话；"
+                f"如果发送，需要自然包含足够的上下文，让后续聊天能知道你在回应什么。"
+                f"只有确实值得单独延续到聊天时才设为 true，否则设为 false。"
+                f"只输出一个 JSON 对象，不要输出 Markdown 或解释："
+                f'{{"comment":"朋友圈评论","send_chat_message":false,"chat_message":""}}'
+                f"其中 send_chat_message 必须是 JSON 布尔值；为 true 时 chat_message 必须填写。"
+            )})
+        else:
+            messages.append({"role": "user", "content": (
+                f"[任务] {moment_author}发了一条朋友圈。"
+                f"请你作为{my_name}，对这条朋友圈写一条简短自然的评论。"
+                f"可以是感想、调侃、鼓励、吐槽等，符合你的性格。"
+                f"直接输出评论内容，不要加任何前缀标记。"
+            )})
 
     return messages
 
@@ -382,8 +422,12 @@ async def _ai_reply_to_moment(who: str, moment_id: str, target_comment_id: str =
         print(f"[moments] AI 回复失败 ({who}): {e}")
         return
 
-    full_text = strip_tool_commands(full_text).strip()
-    if not full_text:
+    expect_chat_decision = target_comment_id is None and moment.get("author") == "user"
+    comment_text, send_chat_message, chat_message = _parse_moment_reply_result(
+        full_text,
+        expect_chat_decision=expect_chat_decision,
+    )
+    if not comment_text:
         return
 
     # 保存评论
@@ -393,16 +437,23 @@ async def _ai_reply_to_moment(who: str, moment_id: str, target_comment_id: str =
         await db.execute(
             "INSERT INTO moment_comments (id, moment_id, author, content, reply_to_id, created_at) "
             "VALUES (?,?,?,?,?,?)",
-            (comment_id, moment_id, who, full_text, target_comment_id, now),
+            (comment_id, moment_id, who, comment_text, target_comment_id, now),
         )
         await db.commit()
 
     # 广播新评论
     comment_data = {
         "id": comment_id, "moment_id": moment_id, "author": who,
-        "content": full_text, "reply_to_id": target_comment_id, "created_at": now,
+        "content": comment_text, "reply_to_id": target_comment_id, "created_at": now,
     }
     await ws_manager.broadcast({"type": "moment_comment", "data": comment_data})
+
+    if send_chat_message:
+        try:
+            from autonomy import _save_private_message
+            await _save_private_message(who, chat_message)
+        except Exception as e:
+            print(f"[moments] 朋友圈聊天续话发送失败 ({who}): {e}")
 
     # 随机决定是否点赞（70% 概率点赞）
     if random.random() < 0.7:
@@ -421,7 +472,7 @@ async def _ai_reply_to_moment(who: str, moment_id: str, target_comment_id: str =
         except Exception:
             pass
 
-    print(f"[moments] {who} 回复了朋友圈 {moment_id}: {full_text[:50]}")
+    print(f"[moments] {who} 回复了朋友圈 {moment_id}: {comment_text[:50]}")
     return comment_data
 
 

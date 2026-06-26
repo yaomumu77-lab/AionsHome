@@ -1939,13 +1939,18 @@ function openMsgReasoning(ev, msgId) {
   pop.append(title, content);
   document.body.appendChild(pop);
   msgReasoningPopover = pop;
-  const rect = ev?.currentTarget?.getBoundingClientRect?.();
-  if (rect) {
+  const trigger = ev?.currentTarget;
+  const rect = trigger?.getBoundingClientRect?.();
+  const messageRect = trigger?.closest?.('.msg-row')?.getBoundingClientRect?.() || rect;
+  if (rect && messageRect) {
     const pad = 8;
     const width = pop.offsetWidth;
+    const availableHeight = Math.max(0, messageRect.top - pad - 6);
+    const heightCap = Math.min(window.innerHeight * 0.28, 260, availableHeight);
+    pop.style.maxHeight = `${heightCap}px`;
     const height = pop.offsetHeight;
     pop.style.left = `${Math.min(Math.max(pad, rect.left), window.innerWidth - width - pad)}px`;
-    pop.style.top = `${rect.bottom + 6 + height <= window.innerHeight - pad ? rect.bottom + 6 : Math.max(pad, rect.top - height - 6)}px`;
+    pop.style.top = `${Math.max(pad, messageRect.top - height - 6)}px`;
   }
 }
 

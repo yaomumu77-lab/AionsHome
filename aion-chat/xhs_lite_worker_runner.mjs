@@ -1,4 +1,4 @@
-import worker from '../xhs-lite-extract/backend/xhs-lite-worker.js';
+import worker from './xhs_lite_worker.js';
 
 const readStdin = async () => {
   const chunks = [];

@@ -470,7 +470,7 @@ async def _save_private_message(
         from routes.chatroom import _get_or_create_connor_private_room
         room_id = await _get_or_create_connor_private_room()
     else:
-        room_id = await _latest_connor_room_id()
+        room_id = manager.get_connor_last_active() or await _latest_connor_room_id()
     if not room_id:
         return None
     from routes.chatroom import _save_msg

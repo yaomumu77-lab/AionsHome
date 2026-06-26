@@ -34,7 +34,10 @@ from context_builder import (
     WISH_CMD_PATTERN,
     append_message_meta,
 )
-from memory import get_embedding, _pack_embedding, memory_kind_for_type, memory_kind_label, _memory_time_payload
+from memory import (
+    get_embedding, _pack_embedding, memory_kind_for_type, memory_kind_label,
+    _memory_time_payload, instant_digest,
+)
 from schedule import (
     process_schedule_commands, ALARM_CMD, REMINDER_CMD, MONITOR_CMD,
     SCHEDULE_DEL_CMD, SCHEDULE_LIST_CMD, _parse_dt, _is_schedule_time_stale,
@@ -2664,22 +2667,66 @@ async def _generate_group_replies(room_id, room, msgs, model_key, connor_model_k
     """群聊回复：顺序执行，第二个 AI 能看到第一个的回复和工具执行结果"""
     query_text = msgs[-1]["content"] if msgs else ""
 
-    aion_first = random.choice([True, False])
     reply_order = load_chatroom_config().get("reply_order", "random")
-    if reply_order == "aion":
-        aion_first = True
-    elif reply_order == "connor":
-        aion_first = False
+    digest = {
+        "is_search_needed": False,
+        "keywords": [],
+        "require_detail": False,
+        "status": "",
+        "topic": "",
+        "first_responder": "random",
+    }
 
-    if aion_first:
-        digest = await _reply_aion(room_id, msgs, context_limit, query_text, model_key, _q,
-                                   tts_enabled=tts_enabled, tts_voice=tts_aion_voice, whisper_mode=whisper_mode)
+    user_name, ai_name, connor_name = get_chatroom_names()
+    recent_for_digest = []
+    for msg in msgs[-6:]:
+        sender = str(msg.get("sender") or "").strip().lower()
+        if sender not in ("user", "aion", "connor"):
+            continue
+        recent_for_digest.append({
+            "role": "assistant" if sender in ("aion", "connor") else "user",
+            "sender": sender,
+            "content": str(msg.get("content") or "")[:200],
+        })
+    try:
+        digest = await asyncio.wait_for(
+            instant_digest(
+                recent_for_digest,
+                group_participants={
+                    "user": user_name,
+                    "aion": ai_name,
+                    "connor": connor_name,
+                },
+            ),
+            timeout=4,
+        )
+    except Exception:
+        pass
+
+    first_responder = digest.get("first_responder", "random")
+    if reply_order == "aion":
+        first_responder = "aion"
+    elif reply_order == "connor":
+        first_responder = "connor"
+    if first_responder not in ("aion", "connor"):
+        first_responder = random.choice(["aion", "connor"])
+
+    if first_responder == "aion":
+        digest = await _reply_aion(
+            room_id, msgs, context_limit, query_text, model_key, _q,
+            tts_enabled=tts_enabled, tts_voice=tts_aion_voice,
+            digest_result=digest, whisper_mode=whisper_mode,
+        )
         _, updated_msgs = await _load_room_and_messages(room_id)
         await _reply_connor(room_id, updated_msgs, context_limit, query_text, _q,
                             connor_model_key=connor_model_key, tts_enabled=tts_enabled, tts_voice=tts_connor_voice, digest_result=digest, whisper_mode=whisper_mode)
     else:
-        digest = await _reply_connor(room_id, msgs, context_limit, query_text, _q,
-                                     connor_model_key=connor_model_key, tts_enabled=tts_enabled, tts_voice=tts_connor_voice, whisper_mode=whisper_mode)
+        digest = await _reply_connor(
+            room_id, msgs, context_limit, query_text, _q,
+            connor_model_key=connor_model_key, tts_enabled=tts_enabled,
+            tts_voice=tts_connor_voice, digest_result=digest,
+            whisper_mode=whisper_mode,
+        )
         _, updated_msgs = await _load_room_and_messages(room_id)
         await _reply_aion(room_id, updated_msgs, context_limit, query_text, model_key, _q,
                           tts_enabled=tts_enabled, tts_voice=tts_aion_voice, digest_result=digest, whisper_mode=whisper_mode)

@@ -202,16 +202,12 @@ BUILTIN_MODELS = {
     "硅基GLM-5.2":      {"provider": "siliconflow", "model": "zai-org/GLM-5.2", "vision": False},
     "硅基Kimi2.7":      {"provider": "siliconflow", "model": "moonshotai/Kimi-K2.7-Code", "vision": True},
     "硅基DS-v4":      {"provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V4-Pro", "vision": False},
-    "Gemini-3.5-flash":  {"provider": "gemini", "model": "gemini-3.5-flash", "vision": True},
-    "Gemini-3.1-pro":  {"provider": "gemini", "model": "gemini-3.1-pro-preview", "vision": True},
-    "CLI-3.1pro":       {"provider": "gemini_cli", "model": "gemini-3.1-pro-preview", "vision": True},
+    "硅基Nex-N2-Pro":      {"provider": "siliconflow", "model": "nex-agi/Nex-N2-Pro", "vision": True},
+    "官方Gemini3.5flash":  {"provider": "gemini", "model": "gemini-3.5-flash", "vision": True},
+    "官方Gemini3.1pro":  {"provider": "gemini", "model": "gemini-3.1-pro-preview", "vision": True},
     # ChatGPT-auth Codex does not support some Codex-only defaults, so pin a
     # model that works after account switches..
     "Codex":            {"provider": "codex_cli",  "model": "gpt-5.5", "vision": True},
-    # Antigravity uses the local agy OAuth session and its saved default model.
-    # Keep agy itself pinned to "Gemini 3.1 Pro (High)" and avoid --model,
-    # because resolving model labels remotely is less stable than the saved default.
-    "AGY-3.1pro":          {"provider": "antigravity_cli", "model": "", "vision": True},
 }
 
 

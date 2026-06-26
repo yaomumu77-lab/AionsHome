@@ -515,6 +515,24 @@ function renderMomentCard(m) {
   </div>`;
 }
 
+function prependMomentOnce(moment) {
+  if (!moment?.id) return false;
+  const existingIndex = allMoments.findIndex(m => m.id === moment.id);
+  if (existingIndex >= 0) {
+    const existing = allMoments[existingIndex];
+    allMoments[existingIndex] = {
+      ...existing,
+      ...moment,
+      comments: moment.comments?.length ? moment.comments : (existing.comments || []),
+      reactions: moment.reactions?.length ? moment.reactions : (existing.reactions || []),
+    };
+    return false;
+  }
+  allMoments.unshift(moment);
+  totalItems++;
+  return true;
+}
+
 // ── 发布弹窗控制 ──
 function openPublishModal() {
   document.getElementById('publishOverlay').classList.add('show');
@@ -537,8 +555,7 @@ async function publishMoment() {
   try {
     const attachments = pendingMomentAttachments.slice();
     const m = await api('POST', '/api/moments', { content, attachments });
-    allMoments.unshift(m);
-    totalItems++;
+    prependMomentOnce(m);
     renderList();
     closePublishModal();
   } catch(e) {
@@ -724,12 +741,9 @@ document.getElementById('publishInput').addEventListener('input', function() {
 // ── WebSocket 实时推送 ──
 function handleMomentWsMessage(msg) {
   if (msg.type === 'moment_new' && msg.data) {
-    // 新朋友圈：检查是否已存在
-    if (!allMoments.find(m => m.id === msg.data.id)) {
-      allMoments.unshift(msg.data);
-      totalItems++;
-      renderList();
-    }
+    // POST 返回和 WebSocket 广播可能先后到达；按 id 保证只插入一次。
+    prependMomentOnce(msg.data);
+    renderList();
   } else if (msg.type === 'moment_comment' && msg.data) {
     upsertMomentComment(msg.data);
   } else if (msg.type === 'moment_reaction' && msg.data) {
