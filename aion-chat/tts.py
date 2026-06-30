@@ -65,9 +65,12 @@ _STRIP_PATTERNS = [
     re.compile(r'\[TOY:[^\]]*\]'),
     re.compile(r'\[MOMENT:[^\]]*\]'),
     re.compile(r'\[MEMORY:[^\]]*\]'),
+    re.compile(r'\[心里嘀咕\s*[：:]\s*[^\]]*\]'),
     re.compile(r'\[查看动态:\d+\]'),
     re.compile(r'\[SELFIE:[^\]]*\]'),
     re.compile(r'\[DRAW:[^\]]*\]'),
+    re.compile(r'\[DATE_(?:BACKGROUND|BG|STATE|ACTION)\s*:\s*[^\]]*\]', re.IGNORECASE),
+    re.compile(r'\[DATE_END_READY\]', re.IGNORECASE),
     re.compile(r'\[悄悄话[：:][^\]]*\]'),
     re.compile(r'<meta>[\s\S]*?</meta>'),
 ]

@@ -354,6 +354,55 @@ async def init_db():
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_theater_msg_conv ON theater_messages(conv_id, created_at)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS date_sessions (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                summary TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'draft',
+                prompt TEXT DEFAULT '',
+                outline TEXT DEFAULT '',
+                opening TEXT DEFAULT '',
+                partner_name TEXT DEFAULT '',
+                persona TEXT DEFAULT '',
+                model TEXT NOT NULL DEFAULT 'gemini-3-flash',
+                ending_trigger TEXT DEFAULT '',
+                outline_usage TEXT DEFAULT '{}',
+                end_usage TEXT DEFAULT '{}',
+                current_background TEXT DEFAULT '背景-客厅',
+                current_state TEXT DEFAULT '平静',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                ended_at REAL,
+                synced_at REAL,
+                synced_target TEXT DEFAULT ''
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_date_sessions_updated ON date_sessions(updated_at DESC)")
+        for col_name, ddl in (
+            ("prompt", "ALTER TABLE date_sessions ADD COLUMN prompt TEXT DEFAULT ''"),
+            ("outline", "ALTER TABLE date_sessions ADD COLUMN outline TEXT DEFAULT ''"),
+            ("opening", "ALTER TABLE date_sessions ADD COLUMN opening TEXT DEFAULT ''"),
+            ("partner_name", "ALTER TABLE date_sessions ADD COLUMN partner_name TEXT DEFAULT ''"),
+            ("outline_usage", "ALTER TABLE date_sessions ADD COLUMN outline_usage TEXT DEFAULT '{}'"),
+            ("end_usage", "ALTER TABLE date_sessions ADD COLUMN end_usage TEXT DEFAULT '{}'"),
+        ):
+            try:
+                await db.execute(ddl)
+            except:
+                pass
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS date_messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                attachments TEXT DEFAULT '[]',
+                FOREIGN KEY (session_id) REFERENCES date_sessions(id) ON DELETE CASCADE
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_date_messages_session ON date_messages(session_id, created_at)")
         # ── 礼物表 ──
         await db.execute("""
             CREATE TABLE IF NOT EXISTS gifts (

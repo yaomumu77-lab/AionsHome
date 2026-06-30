@@ -3,6 +3,7 @@ let currentConvId = null;
 let currentMessages = [];
 let serverMessageIds = new Set();
 let models = [];
+const DEPRECATED_MODEL_PROVIDERS = new Set(["gemini_cli", "antigravity_cli"]);
 let sending = false;
 let streamingAiId = null;
 let _abortController = null;  // 用于中止 AI 生成
@@ -115,6 +116,41 @@ async function init() {
 }
 
 function escHtml(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+function renderInnerMonologues(html) {
+  return String(html || '').replace(/\[心里嘀咕[：:]\s*([^\]]+?)\]/g, (_, content) =>
+    `<span class="inner-monologue">${content.trim()}</span>`
+  );
+}
+function innerMonologueText(s) {
+  const match = String(s || '').match(/^\s*\[心里嘀咕[：:]\s*([^\]]+?)\]\s*$/);
+  return match ? match[1].trim() : null;
+}
+function splitInnerMonologueParts(s) {
+  const items = [];
+  const text = String(s || '');
+  const monologueRe = /\[心里嘀咕[：:]\s*([^\]]+?)\]/g;
+  let last = 0;
+  let match;
+  while ((match = monologueRe.exec(text)) !== null) {
+    const before = text.slice(last, match.index).trim();
+    if (before) items.push({ type: 'bubble', text: before });
+    const thought = (match[1] || '').trim();
+    if (thought) items.push({ type: 'monologue', text: thought });
+    last = monologueRe.lastIndex;
+  }
+  const tail = text.slice(last).trim();
+  if (tail) items.push({ type: 'bubble', text: tail });
+  return items;
+}
+function hasInnerMonologue(s) {
+  return /\[心里嘀咕[：:]\s*[^\]]+?\]/.test(String(s || ''));
+}
+function renderMsgPart(p) {
+  return splitInnerMonologueParts(p).map(item => {
+    if (item.type === 'monologue') return `<div class="inner-monologue-line">${escHtml(item.text)}</div>`;
+    return `<div class="msg-bubble">${formatMsg(item.text)}</div>`;
+  }).join('');
+}
 function formatMsg(s) {
   // 先转义 HTML，再将 [[image:path]] 标记渲染为 <img>
   const escaped = escHtml(s);
@@ -146,7 +182,7 @@ function formatMsg(s) {
     lastIdx = imgRe.lastIndex;
   }
   result += processed.slice(lastIdx).replace(/\n/g, '<br>');
-  return result;
+  return renderInnerMonologues(result);
 }
 
 // ── 配置弹窗 ──
@@ -1075,6 +1111,8 @@ function _cleanupFinishedTTS() {
 let replayAudio = new Audio();
 let replayChunks = []; // 当前重听的分段URL列表
 let replayIdx = 0;
+let replayToken = 0;
+let replayDiscoverPromise = null;
 async function replayTTS(msgId) {
   try {
     const btn = document.querySelector(`#m_${msgId} .tts-replay-btn`);
@@ -1084,6 +1122,8 @@ async function replayTTS(msgId) {
       replayAudio.src = '';
       replayChunks = [];
       btn.classList.remove('playing');
+      replayToken++;
+      replayDiscoverPromise = null;
       return;
     }
     // 停止之前的播放
@@ -1091,47 +1131,67 @@ async function replayTTS(msgId) {
     replayChunks = [];
     document.querySelectorAll('.tts-replay-btn.playing').forEach(b => b.classList.remove('playing'));
 
-    // 尝试加载分段音频（s0, s1, s2...）
-    let chunks = [];
-    for (let i = 0; i < 50; i++) {
-      const resp = await fetch(`/api/tts/audio/${msgId}_s${i}`, { method: 'HEAD' });
-      if (!resp.ok) break;
-      chunks.push(`/api/tts/audio/${msgId}_s${i}`);
-    }
-
-    // 回退：尝试完整文件（旧的缓存格式）
-    if (chunks.length === 0) {
-      const resp = await fetch(`/api/tts/audio/${msgId}`);
-      if (!resp.ok) return;
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      replayAudio.src = url;
-      if (btn) btn.classList.add('playing');
-      replayAudio.onended = () => { URL.revokeObjectURL(url); if (btn) btn.classList.remove('playing'); };
-      replayAudio.onerror = () => { URL.revokeObjectURL(url); if (btn) btn.classList.remove('playing'); };
-      await replayAudio.play().catch(() => { if (btn) btn.classList.remove('playing'); });
-      return;
-    }
-
-    // 顺序播放分段
-    replayChunks = chunks;
+    const token = ++replayToken;
+    replayChunks = [`/api/tts/audio/${msgId}_s0`];
     replayIdx = 0;
     if (btn) btn.classList.add('playing');
-    _playReplayChunk(btn);
+    _playReplayChunk(btn, token);
+
+    replayDiscoverPromise = discoverReplayChunks(msgId).then(chunks => {
+      if (token === replayToken && chunks.length) replayChunks = chunks;
+      return chunks;
+    });
   } catch(e) {
     console.error('重听TTS失败:', e);
   }
 }
 
-function _playReplayChunk(btn) {
+async function discoverReplayChunks(msgId) {
+  const chunks = [];
+  for (let i = 0; i < 50; i++) {
+    const resp = await fetch(`/api/tts/audio/${msgId}_s${i}`, { method: 'HEAD' });
+    if (!resp.ok) break;
+    chunks.push(`/api/tts/audio/${msgId}_s${i}`);
+  }
+  return chunks;
+}
+
+function finishReplay(btn) {
+  if (btn) btn.classList.remove('playing');
+  replayDiscoverPromise = null;
+}
+
+function _playReplayChunk(btn, token = replayToken) {
+  if (token !== replayToken) return;
   if (replayIdx >= replayChunks.length) {
-    if (btn) btn.classList.remove('playing');
+    if (replayDiscoverPromise) {
+      const pending = replayDiscoverPromise;
+      replayDiscoverPromise = null;
+      pending.then(() => {
+        if (token !== replayToken) return;
+        if (replayIdx < replayChunks.length) _playReplayChunk(btn, token);
+        else finishReplay(btn);
+      }).catch(() => finishReplay(btn));
+      return;
+    }
+    finishReplay(btn);
     return;
   }
   replayAudio.src = replayChunks[replayIdx];
-  replayAudio.onended = () => { replayIdx++; _playReplayChunk(btn); };
-  replayAudio.onerror = () => { replayIdx++; _playReplayChunk(btn); };
-  replayAudio.play().catch(() => { if (btn) btn.classList.remove('playing'); });
+  replayAudio.onended = () => { replayIdx++; _playReplayChunk(btn, token); };
+  replayAudio.onerror = () => { replayIdx++; _playReplayChunk(btn, token); };
+  replayAudio.play().catch((err) => {
+    console.warn('[chat TTS] replay chunk play failed', {
+      name: err?.name || '',
+      message: err?.message || '',
+      mediaCode: replayAudio.error?.code || 0,
+      mediaMessage: replayAudio.error?.message || '',
+      networkState: replayAudio.networkState,
+      readyState: replayAudio.readyState,
+      src: replayAudio.currentSrc || replayAudio.src || '',
+    });
+    if (btn) btn.classList.remove('playing');
+  });
 }
 
 
@@ -1485,7 +1545,8 @@ function messagesForDisplay(messages) {
 
 // ── 渲染 ──
 function renderModelSelect() {
-  $("modelSelect").innerHTML = models.map(m =>
+  const visibleModels = models.filter(m => !DEPRECATED_MODEL_PROVIDERS.has(m.provider));
+  $("modelSelect").innerHTML = visibleModels.map(m =>
     `<option value="${m.key}">${m.key}</option>`
   ).join("");
 }
@@ -1559,27 +1620,36 @@ function renderMessages() {
     const displayContent = stripWishFulfillmentMarker(rawDisplayContent).trim();
     const hasVoiceAtt = messageAttachments.some(a => typeof a === 'object' && (a.type === 'voice' || a.type === 'video_clip'));
     const hasWishFulfillmentAtt = messageAttachments.some(a => typeof a === 'object' && a.type === 'wish_fulfillment');
+    const hasDateSummaryAtt = messageAttachments.some(a => typeof a === 'object' && a.type === 'date_summary');
+    const isEmptyMessage = !displayContent && messageAttachments.length === 0;
     // 转账标签前后强制换行，确保卡片独占一个气泡
     const splitContent = displayContent.replace(/(\[转账(?:给[^\uff1a:]+?)?[：:]\s*-?\d+(?:\.\d+)?\s*元\])/g, '\n$1\n');
     const parts = (isUser ? splitContent.split(/\n+/) : splitContent.split(/\n+/)).filter(p => p.trim());
     let bubblesHtml;
-    if (hasWishFulfillmentAtt) {
+    if (hasDateSummaryAtt) {
+      bubblesHtml = `<div class="msg-bubbles date-summary-bubbles">${renderAttachments(messageAttachments)}</div>`;
+    } else if (isEmptyMessage) {
+      bubblesHtml = '<div class="msg-bubble empty-msg-bubble"></div>';
+    } else if (hasWishFulfillmentAtt) {
       const explanationHtml = !isUser
-        ? parts.map(p => `<div class="msg-bubble">${formatMsg(p)}</div>`).join('')
+        ? parts.map(renderMsgPart).join('')
         : '';
       bubblesHtml = `<div class="msg-bubbles wish-card-bubbles">${renderAttachments(messageAttachments)}${explanationHtml}</div>`;
     } else if (hasVoiceAtt && !displayContent.trim()) {
       // 纯语音消息：不显示文本气泡，只显示语音气泡
       bubblesHtml = `<div class="msg-bubble" style="background:transparent;padding:0;box-shadow:none;border:none">${renderAttachments(messageAttachments)}</div>`;
     } else if (parts.length > 1) {
-      bubblesHtml = '<div class="msg-bubbles">' + parts.map(p => `<div class="msg-bubble">${formatMsg(p)}</div>`).join('') + renderAttachments(messageAttachments) + '</div>';
+      bubblesHtml = '<div class="msg-bubbles">' + parts.map(renderMsgPart).join('') + renderAttachments(messageAttachments) + '</div>';
     } else {
-      bubblesHtml = `<div class="msg-bubble">${formatMsg(displayContent)}${renderAttachments(messageAttachments)}</div>`;
+      const monologue = innerMonologueText(displayContent);
+      bubblesHtml = monologue !== null || hasInnerMonologue(displayContent)
+        ? `<div class="msg-bubbles">${renderMsgPart(displayContent)}${renderAttachments(messageAttachments)}</div>`
+        : `<div class="msg-bubble">${formatMsg(displayContent)}${renderAttachments(messageAttachments)}</div>`;
     }
     const avatarSrc = isUser ? '/public/UserIcon.png' : '/public/AIIcon.png';
     const ttsBtn = !isUser ? `<button class="tts-replay-btn" onclick="replayTTS('${m.id}')" title="重听语音">🔊</button>` : '';
     return `
-    <div class="msg-row ${m.role}" id="m_${m.id}" data-msg-id="${m.id}">
+    <div class="msg-row ${m.role}${isEmptyMessage ? ' empty-message' : ''}" id="m_${m.id}" data-msg-id="${m.id}">
       <div class="msg-avatar-col">
         <img class="msg-avatar" src="${avatarSrc}" alt="">
         ${ttsBtn}
@@ -1799,6 +1869,55 @@ function _buildTokenDetailHtml(u) {
   return html;
 }
 
+function _formatSystemLogForCopy(d) {
+  const lines = [];
+  lines.push(`[${d._ts || ''}] ${d.model || '?'}`);
+  if (d.has_error && d.error_text) lines.push(`错误: ${d.error_text}`);
+  if (d.recall_topic) lines.push(`话题: ${d.recall_topic}`);
+  if (d.recall_keywords) lines.push(`关键词: ${d.recall_keywords}`);
+  if (d.recall_query) lines.push(`向量匹配查询:\n${d.recall_query}`);
+  if (d.debug_top6 && d.debug_top6.length > 0) {
+    lines.push('记忆库 Top6:');
+    d.debug_top6.forEach((m, i) => {
+      lines.push(`${i + 1}. score=${m.score} vec=${m.vec_sim} kw=${m.kw_score} imp=${m.importance}\n${m.content || ''}`);
+    });
+  }
+  if (d.recalled_memories && d.recalled_memories.length > 0) {
+    lines.push('实际召回记忆:');
+    d.recalled_memories.forEach((m, i) => {
+      lines.push(`${i + 1}. score=${m.score} type=${m.type || ''}\n${m.content || ''}`);
+    });
+  }
+  if (d.prompt_messages && d.prompt_messages.length > 0) {
+    lines.push('完整 Prompt:');
+    d.prompt_messages.forEach((m, i) => {
+      lines.push(`--- ${i + 1}. ${m.role} ---\n${m.content || ''}`);
+    });
+  }
+  return lines.join('\n\n');
+}
+
+async function copySystemLogEntry(id) {
+  const item = systemLogs.find(log => log._id === id);
+  if (!item) return;
+  try {
+    await navigator.clipboard.writeText(_formatSystemLogForCopy(item));
+    alert('已复制本条系统日志全文');
+  } catch (e) {
+    console.error('复制系统日志失败:', e);
+  }
+}
+
+async function copyAllSystemLogs() {
+  if (!systemLogs.length) return;
+  try {
+    await navigator.clipboard.writeText(systemLogs.map(_formatSystemLogForCopy).join('\n\n==============================\n\n'));
+    alert('已复制全部系统日志');
+  } catch (e) {
+    console.error('复制全部系统日志失败:', e);
+  }
+}
+
 function renderSystemLogList() {
   const el = $("sysLogList");
   const countEl = $("sysLogCount");
@@ -1868,6 +1987,7 @@ function renderSystemLogList() {
       <span class="syslog-tokens">${tokenText}</span>
       <span class="${memCls}">${memText}</span>
       ${hasDetail ? `<button class="syslog-detail-toggle" onclick="toggleSysLogDetail('${detailId}')">详情 ▾</button>` : ''}
+      ${hasDetail ? `<button class="syslog-detail-toggle" onclick="copySystemLogEntry('${d._id}')">复制全文</button>` : ''}
       ${hasDetail ? `<div class="syslog-detail" id="${detailId}">${detailHtml}</div>` : ''}
     </div>`;
   }).join('');
@@ -2463,17 +2583,19 @@ async function _processSSEStream(res) {
             const container = document.getElementById(`m_${aiMsgId}`);
             if (container) {
               const parts = display.split(/\n{2,}/).filter(p => p.trim());
-              const target = container.querySelector('.msg-bubbles') || container.querySelector('.msg-bubble');
+              const target = container.querySelector('.msg-bubbles') || container.querySelector('.msg-bubble') || container.querySelector('.inner-monologue-line');
               if (parts.length > 1) {
                 const wrapper = document.createElement('div');
                 wrapper.className = 'msg-bubbles';
-                wrapper.innerHTML = parts.map(p => `<div class="msg-bubble">${formatMsg(p)}</div>`).join('');
+                wrapper.innerHTML = parts.map(renderMsgPart).join('');
                 target.replaceWith(wrapper);
               } else if (target) {
-                if (target.classList.contains('msg-bubbles')) {
+                const monologue = innerMonologueText(display);
+                const shouldSplit = monologue !== null || hasInnerMonologue(display);
+                if (target.classList.contains('msg-bubbles') || shouldSplit) {
                   const single = document.createElement('div');
-                  single.className = 'msg-bubble';
-                  single.innerHTML = formatMsg(display);
+                  single.className = shouldSplit ? 'msg-bubbles' : 'msg-bubble';
+                  single.innerHTML = shouldSplit ? renderMsgPart(display) : formatMsg(display);
                   target.replaceWith(single);
                 } else {
                   target.innerHTML = formatMsg(display);
@@ -2633,17 +2755,19 @@ async function saveEdit(id) {
             const container = document.getElementById(`m_${aiMsgId}`);
             if (container) {
               const parts = display.split(/\n{2,}/).filter(p => p.trim());
-              const target = container.querySelector('.msg-bubbles') || container.querySelector('.msg-bubble');
+              const target = container.querySelector('.msg-bubbles') || container.querySelector('.msg-bubble') || container.querySelector('.inner-monologue-line');
               if (parts.length > 1) {
                 const wrapper = document.createElement('div');
                 wrapper.className = 'msg-bubbles';
-                wrapper.innerHTML = parts.map(p => `<div class="msg-bubble">${formatMsg(p)}</div>`).join('');
+                wrapper.innerHTML = parts.map(renderMsgPart).join('');
                 target.replaceWith(wrapper);
               } else if (target) {
-                if (target.classList.contains('msg-bubbles')) {
+                const monologue = innerMonologueText(display);
+                const shouldSplit = monologue !== null || hasInnerMonologue(display);
+                if (target.classList.contains('msg-bubbles') || shouldSplit) {
                   const single = document.createElement('div');
-                  single.className = 'msg-bubble';
-                  single.innerHTML = formatMsg(display);
+                  single.className = shouldSplit ? 'msg-bubbles' : 'msg-bubble';
+                  single.innerHTML = shouldSplit ? renderMsgPart(display) : formatMsg(display);
                   target.replaceWith(single);
                 } else {
                   target.innerHTML = formatMsg(display);
@@ -3488,6 +3612,16 @@ function buildGeneratedSongCard(item) {
   </div>`;
 }
 
+function buildDateSummaryCard(item) {
+  const title = escHtml(item.title || '约会');
+  const summary = escHtml(item.summary || '');
+  return `<div class="date-summary-card">
+    <div class="date-summary-kicker">刚刚完成了约会</div>
+    <div class="date-summary-title">${title}</div>
+    ${summary ? `<div class="date-summary-text">${summary}</div>` : ''}
+  </div>`;
+}
+
 function renderAttachments(atts) {
   if (!atts || !atts.length) return '';
   let mediaHtml = '';
@@ -3498,6 +3632,8 @@ function renderAttachments(atts) {
   atts.forEach(item => {
     if (typeof item === 'object' && item.type === 'luckin_payment') {
       mediaHtml += buildLuckinPaymentCard(item);
+    } else if (typeof item === 'object' && item.type === 'date_summary') {
+      mediaHtml += buildDateSummaryCard(item);
     } else if (typeof item === 'object' && item.type === 'wish_fulfillment') {
       wishHtml += buildWishFulfillmentCard(item);
     } else if (typeof item === 'object' && item.type === 'music') {
@@ -4824,6 +4960,7 @@ function getSubPageFrame(url) {
     frame = document.createElement('iframe');
     frame.className = 'sub-page-frame';
     frame.setAttribute('sandbox', 'allow-same-origin allow-scripts allow-forms allow-popups allow-modals');
+    frame.setAttribute('allow', 'autoplay');
     frame.dataset.persistentPath = path;
     attachSubPageFrameLoad(frame);
     $('subPageFrames').appendChild(frame);

@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from config import DEFAULT_MODEL, DATA_DIR, CODEX_UPLOADS_DIR, MODELS, SETTINGS, get_sentinel_config
+from config import DEFAULT_MODEL, DATA_DIR, CODEX_UPLOADS_DIR, MODELS, SETTINGS, get_sentinel_config, resolve_model_key
 from database import get_db
 from ws import manager
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
@@ -62,7 +62,8 @@ _AMBIENT_ACTIVE_LISTENER: dict = {}
 
 def _normalize_cli_bubble_breaks(text: str, model_key: str | None) -> str:
     """Gemini CLI often returns casual chat paragraphs separated by single LF only."""
-    if (MODELS.get((model_key or "").strip() or DEFAULT_MODEL, {}).get("provider") != "gemini_cli"):
+    resolved_model = resolve_model_key(model_key or DEFAULT_MODEL)
+    if (MODELS.get(resolved_model, {}).get("provider") != "gemini_cli"):
         return text
 
     normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -1126,7 +1127,7 @@ def _chatroom_debug_payload(
         "recalled_memories": digest.get("recalled_memories") or [],
         "debug_top6": digest.get("debug_top6") or [],
         "prompt_messages": [
-            {"role": m.get("role", ""), "content": str(m.get("content", ""))[:500]}
+            {"role": m.get("role", ""), "content": str(m.get("content", ""))}
             for m in (history or [])
         ],
         "prompt_count": len(history or []),
@@ -2646,6 +2647,7 @@ async def _generate_connor_reply(room_id, room, msgs, _q, context_limit, *, conn
         room_id, "connor", reply, connor_msg_id,
         attachments=saved_imgs + _music_attachments_from_triggered(triggered) + _luckin_attachments_from_triggered(triggered),
         auto_tts=not (tts_enabled and tts_connor_voice and clean_text),
+        reasoning_content=usage_meta.get("reasoning_content", "").strip(),
     )
     await _q.put({"type": "connor_done", "message": msg})
     await _emit_chatroom_debug(_q, _chatroom_debug_payload(

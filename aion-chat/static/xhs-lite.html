@@ -20,15 +20,14 @@ body.sub-page {
   min-height:100dvh;
   height:auto;
   overflow:auto;
-  background:
-    radial-gradient(circle at 12% 0%, rgba(255,107,127,.18), transparent 26rem),
-    radial-gradient(circle at 90% 8%, rgba(255,152,96,.15), transparent 22rem),
-    var(--bg);
+  background:var(--bg);
 }
 .wrap {
   width:min(1040px, 100%);
   margin:0 auto;
   padding:18px 14px 34px;
+  display:flex;
+  flex-direction:column;
 }
 .panel {
   border:1px solid var(--xhs-line);
@@ -41,24 +40,15 @@ body.sub-page {
   -webkit-backdrop-filter:blur(14px) saturate(1.2);
 }
 .hero {
+  order:0;
   display:grid;
   grid-template-columns:minmax(0, 1fr) auto;
   gap:14px;
-  align-items:start;
+  align-items:center;
   overflow:hidden;
   position:relative;
 }
-.hero::after {
-  content:"";
-  position:absolute;
-  right:-60px;
-  top:-80px;
-  width:190px;
-  height:190px;
-  border-radius:50%;
-  background:linear-gradient(135deg, rgba(255,107,127,.28), rgba(255,152,96,.20));
-  pointer-events:none;
-}
+.hero .subtitle { max-width:620px; }
 .title-row,
 .section-head {
   display:flex;
@@ -179,43 +169,30 @@ button:disabled {
   cursor:default;
   transform:none;
 }
-.quick-glance {
-  display:grid;
-  grid-template-columns:repeat(4,minmax(0,1fr));
-  gap:10px;
-  margin-top:15px;
-}
-.glance-card {
-  border:1px solid rgba(255,107,127,.18);
-  border-radius:16px;
-  background:linear-gradient(180deg, rgba(255,255,255,.82), rgba(255,244,238,.70));
-  padding:11px 12px;
-  min-width:0;
-}
-.glance-card span {
-  display:block;
-  color:var(--text3);
-  font-size:11px;
-  margin-bottom:3px;
-}
-.glance-card strong {
-  display:block;
-  color:var(--text);
-  font-size:14px;
-  overflow:hidden;
-  text-overflow:ellipsis;
-  white-space:nowrap;
-}
-.glance-card.ok strong { color:#248a52; }
-.glance-card.warn strong { color:#b86b00; }
-.glance-card.off strong { color:var(--text3); }
-.daily-panel {
-  background:linear-gradient(135deg, rgba(255,255,255,.84), rgba(255,241,235,.74));
-}
 .toggle-grid {
   display:grid;
   grid-template-columns:repeat(auto-fit,minmax(210px,1fr));
   gap:10px;
+  margin-top:14px;
+}
+.config-toggle-grid {
+  margin-top:10px;
+}
+.action-layout {
+  display:grid;
+  grid-template-columns:minmax(280px,.85fr) minmax(320px,1.15fr);
+  gap:12px;
+  margin-top:10px;
+}
+.action-panel textarea {
+  min-height:92px;
+}
+.panel-actions {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  flex-wrap:wrap;
   margin-top:14px;
 }
 .switch-card {
@@ -315,8 +292,15 @@ button:disabled {
   accent-color:var(--xhs-accent);
 }
 .config-panel {
+  order:1;
   padding:0;
   overflow:hidden;
+}
+.action-panel {
+  order:2;
+}
+.status-panel {
+  order:3;
 }
 .panel-summary {
   list-style:none;
@@ -374,15 +358,6 @@ details[open] .summary-caret {
   border-radius:16px;
   background:rgba(255,255,255,.56);
   padding:12px;
-}
-.followings-box {
-  display:flex;
-  flex-wrap:wrap;
-  gap:6px;
-  max-height:150px;
-  overflow:auto;
-  padding:2px;
-  margin-top:6px;
 }
 .status-card {
   display:grid;
@@ -478,81 +453,16 @@ pre {
   white-space:pre-wrap;
   word-break:break-word;
 }
-.log-toolbar {
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:10px;
-  margin-top:4px;
-}
-.log-list {
-  display:grid;
-  gap:10px;
-  margin-top:12px;
-}
-.log-item {
-  border:1px solid var(--xhs-line);
-  border-radius:18px;
-  background:rgba(255,255,255,.66);
-  padding:13px;
-}
-.log-item.errorish {
-  border-color:rgba(207,34,46,.18);
-}
-.log-top {
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:10px;
-  margin-bottom:9px;
-}
-.log-title {
-  min-width:0;
-  font-weight:900;
-  color:var(--text);
-  overflow:hidden;
-  text-overflow:ellipsis;
-  white-space:nowrap;
-}
-.log-main {
-  display:grid;
-  gap:6px;
-  color:var(--text2);
-  font-size:13px;
-  line-height:1.5;
-}
-.log-line {
-  overflow:hidden;
-  text-overflow:ellipsis;
-  white-space:nowrap;
-}
-.log-comment {
-  padding:9px 10px;
-  border-radius:14px;
-  background:rgba(255,107,127,.08);
-  color:var(--text);
-  word-break:break-word;
-}
-.empty-state {
-  border:1px dashed var(--xhs-line);
-  border-radius:18px;
-  padding:20px;
-  text-align:center;
-  color:var(--text3);
-  background:rgba(255,255,255,.42);
-}
 @media (max-width:720px) {
   .wrap { padding:12px 10px 28px; }
   .hero { grid-template-columns:1fr; }
-  .quick-glance { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .action-layout { grid-template-columns:1fr; }
   .title-row,
-  .section-head,
-  .log-toolbar {
+  .section-head {
     flex-direction:column;
     align-items:stretch;
   }
-  .section-head .row,
-  .log-toolbar .row {
+  .section-head .row {
     justify-content:flex-start;
   }
 }
@@ -563,75 +473,57 @@ pre {
   <section class="panel hero">
     <div>
       <p class="eyebrow">XHS LITE</p>
-      <h1>📕 小红书巡游工作台</h1>
-      <div class="subtitle">把日常操作放在上面，Cookie、目标账号和高级参数都收进配置抽屉；运行结果和日志只展示关键摘要，完整返回默认折叠。</div>
-      <div class="quick-glance">
-        <div class="glance-card off" id="glanceEnabled"><span>模块</span><strong>加载中</strong></div>
-        <div class="glance-card off" id="glanceCookie"><span>Cookie</span><strong>加载中</strong></div>
-        <div class="glance-card off" id="glanceTarget"><span>目标账号</span><strong>加载中</strong></div>
-        <div class="glance-card off" id="glanceWrite"><span>写入权限</span><strong>加载中</strong></div>
-      </div>
+      <h1>小红书巡游工作台</h1>
+      <div class="subtitle">目标账号和行动说明放在常用区；账号、权限和角色开关收进基础配置。</div>
     </div>
-    <button class="ghost" onclick="location.href='/'">返回首页</button>
+    <button class="ghost" type="button" onclick="location.href='/'">返回首页</button>
   </section>
 
-  <section class="panel daily-panel">
+  <section class="panel action-panel">
     <div class="section-head">
       <div>
-        <p class="eyebrow">DAILY</p>
-        <h2>日常操作</h2>
-        <div class="hint">常用开关、角色启用和手动测试都在这里；改完开关后点保存即可。</div>
+        <p class="eyebrow">ACTION</p>
+        <h2>本次行动</h2>
       </div>
-      <button onclick="saveConfig()">保存当前设置</button>
     </div>
 
-    <div class="toggle-grid">
-      <label class="switch-card">
-        <input type="checkbox" id="enabledInput">
-        <span class="switch-knob"></span>
-        <span class="switch-copy"><strong>启用模块</strong><span>总开关，关闭后自动和手动巡游都会停止。</span></span>
-      </label>
-      <label class="switch-card">
-        <input type="checkbox" id="autoEnabledInput">
-        <span class="switch-knob"></span>
-        <span class="switch-copy"><strong>闲时自动巡游</strong><span>允许后台在合适时机自动跑小红书任务。</span></span>
-      </label>
-      <label class="switch-card">
-        <input type="checkbox" id="writeInput">
-        <span class="switch-knob"></span>
-        <span class="switch-copy"><strong>真实评论/回复</strong><span>关闭时只会生成草稿和日志，不会发到小红书。</span></span>
-      </label>
+    <div class="action-layout">
+      <div class="inline-card">
+        <h2>目标账号</h2>
+        <div class="compact-grid">
+          <div>
+            <label>目标账号 user_id</label>
+            <input id="targetUserIdInput" autocomplete="off" placeholder="填写 user_id">
+          </div>
+          <div>
+            <label>目标账号昵称</label>
+            <input id="targetNicknameInput" autocomplete="off" placeholder="可选">
+          </div>
+        </div>
+      </div>
+
+      <div class="inline-card">
+        <h2>行动说明</h2>
+        <label>给角色的本次目标</label>
+        <textarea id="taskInstructionInput" placeholder="例如：看目标账号最新帖子和评论区，合适时回复一条评论。"></textarea>
+      </div>
     </div>
 
-    <div class="actor-grid">
-      <article class="actor-card">
-        <div class="actor-top">
-          <div>
-            <div class="actor-name" id="actorPrimaryLabel">主AI</div>
-            <div class="hint">角色巡游开关与手动测试</div>
-          </div>
-          <label class="check"><input type="checkbox" id="actorPrimaryInput"> 启用</label>
-        </div>
-        <button class="secondary" id="runPrimaryBtn" onclick="runOnce('aion')">让主AI跑一次</button>
-      </article>
-      <article class="actor-card">
-        <div class="actor-top">
-          <div>
-            <div class="actor-name" id="actorSecondaryLabel">第二AI</div>
-            <div class="hint">角色巡游开关与手动测试</div>
-          </div>
-          <label class="check"><input type="checkbox" id="actorSecondaryInput"> 启用</label>
-        </div>
-        <button class="secondary" id="runSecondaryBtn" onclick="runOnce('connor')">让第二AI跑一次</button>
-      </article>
+    <div class="panel-actions">
+      <div class="row">
+        <button type="button" onclick="saveConfig()">保存</button>
+        <button class="secondary" type="button" id="runPrimaryBtn" onclick="runOnce('aion')">让主AI跑一次</button>
+        <button class="secondary" type="button" id="runSecondaryBtn" onclick="runOnce('connor')">让第二AI跑一次</button>
+      </div>
+      <div class="hint">运行时会先保存当前目标和说明。</div>
     </div>
   </section>
 
   <details class="panel config-panel" id="configDetails">
     <summary class="panel-summary">
       <span class="summary-title">
-        <strong>配置抽屉</strong>
-        <span>Cookie、目标账号、行动说明和高级参数都收在这里</span>
+        <strong>基础配置</strong>
+        <span id="configSummaryText">账号与权限配置</span>
       </span>
       <span class="summary-caret">›</span>
     </summary>
@@ -644,75 +536,90 @@ pre {
           <div class="mini-note" id="cookieHint">读取中...</div>
           <div class="hint" id="accountHint" style="margin-top:6px"></div>
           <div class="row" style="margin-top:10px">
-            <button class="secondary" onclick="checkLogin()">测试登录</button>
+            <button class="secondary" type="button" onclick="checkLogin()">测试登录</button>
             <label class="check"><input type="checkbox" id="clearCookieInput"> 清空已保存 cookie</label>
           </div>
         </div>
 
         <div class="inline-card">
-          <h2>目标账号</h2>
-          <label>目标账号 user_id（让他们去看这个号的帖子）</label>
-          <input id="targetUserIdInput" autocomplete="off" placeholder="填目标账号 user_id">
-          <div class="row" style="margin-top:8px">
-            <button class="secondary" type="button" onclick="loadFollowings()">从关注列表选择</button>
+          <h2>模块与权限</h2>
+          <div class="toggle-grid config-toggle-grid">
+            <label class="switch-card">
+              <input type="checkbox" id="enabledInput">
+              <span class="switch-knob"></span>
+              <span class="switch-copy"><strong>启用模块</strong><span>总开关</span></span>
+            </label>
+            <label class="switch-card">
+              <input type="checkbox" id="autoEnabledInput">
+              <span class="switch-knob"></span>
+              <span class="switch-copy"><strong>闲时自动巡游</strong><span>后台自动运行</span></span>
+            </label>
+            <label class="switch-card">
+              <input type="checkbox" id="writeInput">
+              <span class="switch-knob"></span>
+              <span class="switch-copy"><strong>真实评论/回复</strong><span>允许外部写入</span></span>
+            </label>
           </div>
-          <div class="hint" id="followingsHint" style="margin-top:6px"></div>
-          <div id="followingsBox" class="followings-box"></div>
-          <div class="mini-note" id="targetSummary">还没填写目标账号</div>
         </div>
       </div>
 
-      <div class="inline-card" style="margin-top:12px">
-        <h2>行动说明</h2>
-        <label>给角色的长期/本次目标</label>
-        <textarea id="taskInstructionInput" placeholder="例如：看目标账号最新帖子和评论区，合适时回复一条评论。"></textarea>
+      <div class="actor-grid">
+        <article class="actor-card">
+          <div class="actor-top">
+            <div>
+              <div class="actor-name" id="actorPrimaryLabel">主AI</div>
+              <div class="hint">角色启用状态</div>
+            </div>
+            <label class="check"><input type="checkbox" id="actorPrimaryInput"> 启用</label>
+          </div>
+        </article>
+        <article class="actor-card">
+          <div class="actor-top">
+            <div>
+              <div class="actor-name" id="actorSecondaryLabel">第二AI</div>
+              <div class="hint">角色启用状态</div>
+            </div>
+            <label class="check"><input type="checkbox" id="actorSecondaryInput"> 启用</label>
+          </div>
+        </article>
       </div>
 
       <details style="margin-top:12px">
-        <summary>高级参数 / 手动修正</summary>
+        <summary>高级参数</summary>
         <div class="compact-grid" style="margin-top:10px">
-          <div>
-            <label>目标账号昵称</label>
-            <input id="targetNicknameInput" autocomplete="off" placeholder="可选，用来辅助识别">
-          </div>
-          <div>
-            <label>xsec_token</label>
-            <input id="targetXsecInput" autocomplete="off" placeholder="关注列表选择时可能自动带；没有就留空">
-          </div>
           <div>
             <label>防反爬等待秒数</label>
             <input id="delayInput" type="number" min="5" step="1" value="5">
-          </div>
-          <div>
-            <label>关注列表最多翻页数</label>
-            <input id="followPagesInput" type="number" min="1" max="10" step="1" value="3">
           </div>
           <div>
             <label>塞给模型的评论数上限</label>
             <input id="maxCommentsInput" type="number" min="5" max="50" step="1" value="20">
           </div>
           <div>
-            <label>评论署名模板</label>
+            <label>评论签名模板</label>
             <input id="signatureInput" value=" ——{actor_name}">
           </div>
+          <div>
+            <label>xsec_token</label>
+            <input id="targetXsecInput" autocomplete="off" placeholder="可选，通常不用填">
+          </div>
         </div>
-        <label class="check" style="margin-top:10px"><input type="checkbox" id="followInput"> 没选 user_id 时，优先用关注列表匹配昵称</label>
       </details>
 
       <div class="row" style="margin-top:14px">
-        <button onclick="saveConfig()">保存配置</button>
-        <button class="ghost" type="button" onclick="$('configDetails').open = false">收起配置</button>
+        <button type="button" onclick="saveConfig()">保存基础配置</button>
+        <button class="ghost" type="button" onclick="$('configDetails').open = false">收起</button>
       </div>
     </div>
   </details>
 
-  <section class="panel">
+  <section class="panel status-panel">
     <div class="section-head">
       <div>
         <p class="eyebrow">STATUS</p>
         <h2>运行状态</h2>
       </div>
-      <div class="hint">只显示关键结果；完整 JSON 在下方折叠。</div>
+      <button class="ghost" type="button" onclick="location.href='/xhs-lite-logs'">查看最近日志</button>
     </div>
     <div class="status-card busy" id="statusCard">
       <div class="status-icon" id="statusIcon">…</div>
@@ -728,27 +635,11 @@ pre {
     </details>
   </section>
 
-  <section class="panel">
-    <div class="log-toolbar">
-      <div>
-        <p class="eyebrow">LOGS</p>
-        <h2>最近日志</h2>
-        <div class="hint" id="logsHint">只展示最近记录摘要，理由和原始记录已折叠。</div>
-      </div>
-      <div class="row">
-        <button class="secondary small" onclick="loadLogs()">刷新</button>
-        <button class="ghost small" id="moreLogsBtn" onclick="loadMoreLogs()">加载更多</button>
-      </div>
-    </div>
-    <div id="logsBox" class="log-list"></div>
-  </section>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
 let currentConfig = null;
-let followingUsers = [];
-let currentLogLimit = 12;
 
 async function api(method, url, body) {
   const opts = { method, headers: {'Content-Type': 'application/json'} };
@@ -790,19 +681,17 @@ function statusTone(status, ok = true) {
 function actorName(actor) {
   return (currentConfig && currentConfig.actor_labels && currentConfig.actor_labels[actor]) || (actor === 'aion' ? '主AI' : '第二AI');
 }
-function setGlance(id, value, cls) {
-  const el = $(id);
-  if (!el) return;
-  el.className = 'glance-card ' + (cls || 'off');
-  el.querySelector('strong').textContent = value;
-}
 function updateOverview() {
   if (!currentConfig) return;
-  const hasTarget = !!(currentConfig.target_user_id || currentConfig.target_nickname);
-  setGlance('glanceEnabled', currentConfig.enabled ? '已启用' : '未启用', currentConfig.enabled ? 'ok' : 'off');
-  setGlance('glanceCookie', currentConfig.cookie_configured ? '已保存' : '未配置', currentConfig.cookie_configured ? 'ok' : 'warn');
-  setGlance('glanceTarget', hasTarget ? (currentConfig.target_nickname || currentConfig.target_user_id) : '未填写', hasTarget ? 'ok' : 'warn');
-  setGlance('glanceWrite', currentConfig.allow_write_comments ? '允许真实写入' : '仅草稿/观察', currentConfig.allow_write_comments ? 'warn' : 'off');
+  const summary = $('configSummaryText');
+  if (summary) {
+    const parts = [
+      currentConfig.enabled ? '模块已启用' : '模块未启用',
+      currentConfig.cookie_configured ? 'Cookie 已保存' : 'Cookie 未配置',
+      currentConfig.allow_write_comments ? '允许真实写入' : '仅草稿/观察'
+    ];
+    summary.textContent = parts.join(' · ');
+  }
 }
 function renderStatus({ title, text, tone = 'ok', icon = '✓', meta = [], raw = '' }) {
   const card = $('statusCard');
@@ -873,25 +762,18 @@ function setStatus(value, tone) {
   }
 }
 function updateTargetSummary() {
-  const uid = $('targetUserIdInput').value.trim();
-  const nick = $('targetNicknameInput').value.trim();
-  $('targetSummary').textContent = (uid || nick)
-    ? ('目标账号：' + (nick || '未填昵称') + (uid ? ' / user_id: ' + uid : ''))
-    : '还没填写目标账号：这里填目标账号 user_id；昵称可在高级里选填';
 }
-async function loadConfig() {
+async function loadConfig(options = {}) {
   currentConfig = await api('GET', '/api/xhs-lite/config');
   $('enabledInput').checked = !!currentConfig.enabled;
   $('autoEnabledInput').checked = !!currentConfig.auto_enabled;
   $('writeInput').checked = !!currentConfig.allow_write_comments;
-  $('followInput').checked = currentConfig.use_following_list !== false;
   $('targetUserIdInput').value = currentConfig.target_user_id || '';
   $('targetNicknameInput').value = currentConfig.target_nickname || '';
   $('targetXsecInput').value = currentConfig.target_xsec_token || '';
   updateTargetSummary();
   $('taskInstructionInput').value = currentConfig.task_instruction || '';
   $('delayInput').value = currentConfig.write_delay_seconds || 5;
-  $('followPagesInput').value = currentConfig.max_following_pages || 3;
   $('maxCommentsInput').value = currentConfig.max_comments_for_prompt || 20;
   $('signatureInput').value = currentConfig.comment_signature_template || ' ——{actor_name}';
   $('actorPrimaryInput').checked = !currentConfig.actors || !currentConfig.actors.aion || currentConfig.actors.aion.enabled !== false;
@@ -906,38 +788,10 @@ async function loadConfig() {
   if (currentConfig.logged_in_user_id) accountBits.push('user_id：' + currentConfig.logged_in_user_id);
   if (currentConfig.logged_in_red_id) accountBits.push('red_id：' + currentConfig.logged_in_red_id);
   let accountText = accountBits.length ? ('操作账号（cookie 对应账号）：' + accountBits.join('，')) : '测试登录成功后会显示操作账号昵称和 ID';
-  if (!currentConfig.target_user_id && !currentConfig.target_nickname) accountText += '。目标账号还没填：请在右侧填写。';
   $('accountHint').textContent = accountText;
-  $('configDetails').open = !(currentConfig.cookie_configured && (currentConfig.target_user_id || currentConfig.target_nickname));
+  $('configDetails').open = !currentConfig.cookie_configured;
   updateOverview();
-  setStatus('设置已加载。');
-}
-async function loadFollowings() {
-  $('followingsHint').textContent = '读取关注列表中...';
-  $('followingsBox').innerHTML = '';
-  setStatus('读取关注列表中...', 'busy');
-  const res = await api('GET', '/api/xhs-lite/followings');
-  if (!res.ok) {
-    $('followingsHint').textContent = '读取失败：' + (res.error || '未知错误');
-    setStatus(res);
-    return;
-  }
-  followingUsers = Array.isArray(res.users) ? res.users : [];
-  $('followingsHint').textContent = followingUsers.length ? ('找到 ' + followingUsers.length + ' 个关注账号，点击其中一个设为目标。') : '关注列表为空或接口没有返回账号。';
-  $('followingsBox').innerHTML = followingUsers.map((u, idx) => {
-    const label = esc((u.nickname || '未命名账号') + ' / user_id: ' + (u.user_id || '') + (u.red_id ? ' / red_id: ' + u.red_id : ''));
-    return '<button class="secondary small" type="button" onclick="selectFollowing(' + idx + ')">' + label + '</button>';
-  }).join('');
-  setStatus('关注列表读取完成：' + followingUsers.length + ' 个账号。');
-}
-function selectFollowing(index) {
-  const user = followingUsers[index];
-  if (!user) return;
-  $('targetUserIdInput').value = user.user_id || '';
-  $('targetNicknameInput').value = user.nickname || '';
-  $('targetXsecInput').value = user.xsec_token || $('targetXsecInput').value;
-  updateTargetSummary();
-  setStatus('已选择目标账号：' + (user.nickname || user.user_id || '') + '。记得点“保存配置”。');
+  if (!options.silent) setStatus('设置已加载。');
 }
 function collectPayload() {
   const cookie = $('cookieInput').value.trim();
@@ -945,14 +799,13 @@ function collectPayload() {
     enabled: $('enabledInput').checked,
     auto_enabled: $('autoEnabledInput').checked,
     allow_write_comments: $('writeInput').checked,
-    use_following_list: $('followInput').checked,
+    use_following_list: false,
     clear_cookie: $('clearCookieInput').checked,
     target_user_id: $('targetUserIdInput').value.trim(),
     target_nickname: $('targetNicknameInput').value.trim(),
     target_xsec_token: $('targetXsecInput').value.trim(),
     task_instruction: $('taskInstructionInput').value.trim(),
     write_delay_seconds: parseFloat($('delayInput').value || '5'),
-    max_following_pages: parseInt($('followPagesInput').value || '3', 10),
     max_comments_for_prompt: parseInt($('maxCommentsInput').value || '20', 10),
     comment_signature_template: $('signatureInput').value || ' ——{actor_name}',
     actors: {
@@ -963,13 +816,14 @@ function collectPayload() {
   if (cookie) payload.cookie = cookie;
   return payload;
 }
-async function saveConfig() {
+async function saveConfig(options = {}) {
+  const quiet = options.quiet === true;
   const payload = collectPayload();
-  setStatus('保存中...', 'busy');
+  setStatus(quiet ? '保存本次行动中...' : '保存中...', 'busy');
   const savedRaw = await api('PUT', '/api/xhs-lite/config', payload);
   if (savedRaw.ok === false) {
     setStatus(savedRaw);
-    return;
+    return false;
   }
   const saved = savedRaw.config || savedRaw;
   const savedTarget = String(saved.target_user_id || '').trim();
@@ -989,13 +843,16 @@ async function saveConfig() {
       icon:'!',
       raw:JSON.stringify(saved, null, 2)
     });
-    return;
+    return false;
   }
   currentConfig = saved;
   $('cookieInput').value = '';
   $('clearCookieInput').checked = false;
-  await loadConfig();
-  setStatus('保存完成。页面不会回显完整 cookie；如果概览显示“已保存”，说明 cookie 仍在配置里。');
+  await loadConfig({ silent:true });
+  if (!quiet) {
+    setStatus('保存完成。页面不会回显完整 cookie；如果基础配置显示 Cookie 已保存，说明 cookie 仍在配置里。');
+  }
+  return true;
 }
 async function checkLogin() {
   setStatus('测试登录中...', 'busy');
@@ -1017,13 +874,14 @@ async function checkLogin() {
   }
 }
 async function runOnce(actor) {
-  setStatus(actorName(actor) + ' 正在巡游小红书...', 'busy');
   $('runPrimaryBtn').disabled = true;
   $('runSecondaryBtn').disabled = true;
   try {
+    const saved = await saveConfig({ quiet:true });
+    if (!saved) return;
+    setStatus(actorName(actor) + ' 正在巡游小红书...', 'busy');
     const res = await api('POST', '/api/xhs-lite/run-once', { actor: actor });
     setStatus(res);
-    await loadLogs();
   } catch (err) {
     setStatus({ ok:false, error:err.message || String(err) });
   } finally {
@@ -1031,57 +889,7 @@ async function runOnce(actor) {
     $('runSecondaryBtn').disabled = false;
   }
 }
-function fmtTime(ts) {
-  if (!ts) return '';
-  const d = new Date(ts * 1000);
-  return (d.getMonth()+1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
-}
-function renderLogItem(item) {
-  const target = item.target || {};
-  const note = item.note || {};
-  const decision = item.decision || {};
-  const status = item.status || '';
-  const tone = statusTone(status, !item.error || status === 'drafted');
-  const title = (item.actor_name || item.actor || '角色') + '：' + statusName(status);
-  const targetText = target.nickname || target.user_id || '未记录目标';
-  const noteText = note.title || note.note_id || '未记录帖子';
-  const commentText = item.comment_text || (status === 'observed' ? '本次只观察，没有评论。' : '（无评论内容）');
-  const reasonText = decision.reason || item.error || '';
-  const raw = esc(JSON.stringify(item, null, 2));
-  return '<article class="log-item ' + (tone === 'error' ? 'errorish' : '') + '">'
-    + '<div class="log-top">'
-    + '<div class="log-title">' + esc(title) + '</div>'
-    + '<div class="row">' + pill(fmtTime(item.created_at), 'neutral') + pill(statusName(status), tone) + '</div>'
-    + '</div>'
-    + '<div class="log-main">'
-    + '<div class="log-line">目标：' + esc(targetText) + '</div>'
-    + '<div class="log-line">帖子：' + esc(noteText) + '</div>'
-    + '<div class="log-comment">' + esc(brief(commentText, 170)) + '</div>'
-    + (reasonText ? '<div class="hint">理由：' + esc(brief(reasonText, 120)) + '</div>' : '')
-    + '</div>'
-    + '<details class="log-extra">'
-    + '<summary>展开理由和完整记录</summary>'
-    + (reasonText ? '<div class="mini-note">完整理由：' + esc(reasonText) + '</div>' : '')
-    + '<pre>' + raw + '</pre>'
-    + '</details>'
-    + '</article>';
-}
-async function loadLogs() {
-  const data = await api('GET', '/api/xhs-lite/logs?limit=' + currentLogLimit);
-  const items = Array.isArray(data.items) ? data.items : [];
-  $('logsHint').textContent = items.length
-    ? '正在显示最近 ' + items.length + ' 条记录；摘要之外的冗余字段已折叠。'
-    : '还没有日志，手动跑一次后会出现在这里。';
-  $('logsBox').innerHTML = items.length
-    ? items.map(renderLogItem).join('')
-    : '<div class="empty-state">暂无日志</div>';
-  $('moreLogsBtn').disabled = currentLogLimit >= 100;
-}
-function loadMoreLogs() {
-  currentLogLimit = Math.min(100, currentLogLimit + 20);
-  loadLogs();
-}
-loadConfig().then(loadLogs).catch(err => setStatus({ ok:false, error:'加载失败：' + err.message }));
+loadConfig().catch(err => setStatus({ ok:false, error:'加载失败：' + err.message }));
 $('targetUserIdInput')?.addEventListener('input', updateTargetSummary);
 $('targetNicknameInput')?.addEventListener('input', updateTargetSummary);
 ['enabledInput','autoEnabledInput','writeInput','actorPrimaryInput','actorSecondaryInput'].forEach(id => {

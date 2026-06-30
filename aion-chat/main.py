@@ -40,6 +40,7 @@ from routes import diary as diary_routes
 from routes import activity as activity_routes
 from routes import book as book_routes
 from routes import theater as theater_routes
+from routes import date_theater as date_theater_routes
 from routes import ghost_forest as ghost_forest_routes
 from routes import gift as gift_routes
 from routes import fund as fund_routes
@@ -57,6 +58,7 @@ from routes import autonomy as autonomy_routes
 from routes import persona_evolution as persona_evolution_routes
 from routes import wishes as wishes_routes
 from routes import xhs_lite as xhs_lite_routes
+from routes import capabilities as capabilities_routes
 from activity import pc_tracker, pc_display_tracker
 from memory import auto_digest
 from chatroom import _connor_1v1_auto_digest_loop
@@ -211,6 +213,7 @@ app.include_router(diary_routes.router)
 app.include_router(activity_routes.router)
 app.include_router(book_routes.router)
 app.include_router(theater_routes.router)
+app.include_router(date_theater_routes.router)
 app.include_router(ghost_forest_routes.router)
 app.include_router(gift_routes.router)
 app.include_router(fund_routes.router)
@@ -228,6 +231,7 @@ app.include_router(autonomy_routes.router)
 app.include_router(persona_evolution_routes.router)
 app.include_router(wishes_routes.router)
 app.include_router(xhs_lite_routes.router)
+app.include_router(capabilities_routes.router)
 
 
 @app.get("/api/client-assets")
@@ -250,6 +254,10 @@ async def chat_page():
 @app.get("/settings")
 async def settings_page():
     return FileResponse(BASE_DIR / "static" / "settings.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+@app.get("/capabilities")
+async def capabilities_page():
+    return FileResponse(BASE_DIR / "static" / "capabilities.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/worldbook")
 async def worldbook_page():
@@ -299,6 +307,10 @@ async def reading_page():
 async def theater_page():
     return FileResponse(BASE_DIR / "static" / "theater.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
+@app.get("/date-theater")
+async def date_theater_page():
+    return FileResponse(BASE_DIR / "static" / "date_theater.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
 @app.get("/ghost-forest")
 async def ghost_forest_page():
     return FileResponse(BASE_DIR / "static" / "ghost-forest.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
@@ -338,6 +350,10 @@ async def wishes_page():
 @app.get("/xhs-lite")
 async def xhs_lite_page():
     return FileResponse(BASE_DIR / "static" / "xhs-lite.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+@app.get("/xhs-lite-logs")
+async def xhs_lite_logs_page():
+    return FileResponse(BASE_DIR / "static" / "xhs-lite-logs.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/health")
 async def health_page():

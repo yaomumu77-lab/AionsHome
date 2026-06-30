@@ -100,6 +100,8 @@ def _resolve_entries(entries: list) -> list:
     """对历史条目做名称解析 + 过滤"""
     result = []
     for e in entries:
+        if e.get("device") == "home" and e.get("kind") == "home_sensor":
+            continue
         resolved = resolve_app_name(e.get("app", ""), e.get("title", ""))
         if resolved is None:
             continue  # 过滤系统应用
@@ -266,21 +268,6 @@ async def get_timeline(hours: int = 24, limit: int = 300):
                 r["created_at"], "idle_event", actor,
                 title, _clip(r["detail"]), r["id"],
             ))
-
-    for entry in read_recent_activity(hours):
-        if entry.get("device") != "home" or entry.get("kind") != "home_sensor":
-            continue
-        ts = float(entry.get("timestamp") or 0)
-        if ts < cutoff:
-            continue
-        title = str(entry.get("title") or "").strip()
-        if not title:
-            continue
-        items.append(_timeline_item(
-            ts, "home_sensor", user_name,
-            title, _clip(entry.get("detail") or entry.get("sensor_label") or ""),
-            str(entry.get("entity_id") or ""),
-        ))
 
     status = load_location_status()
     changed_at = float(status.get("state_changed_at") or 0)

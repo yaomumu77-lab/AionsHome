@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#080706">
+  <title>去约会</title>
+  <link rel="stylesheet" href="/static/date_theater.css?v=20260629-date-theater-actions2">
+</head>
+<body>
+  <main id="dateApp" class="date-app">
+    <section class="date-stage" aria-label="去约会">
+      <div class="date-bg date-bg-a active"></div>
+      <div class="date-bg date-bg-b"></div>
+      <div class="date-vignette"></div>
+
+      <div class="date-actor">
+        <video id="dateActorA" class="date-actor-video active" autoplay loop playsinline></video>
+        <video id="dateActorB" class="date-actor-video" autoplay loop playsinline></video>
+      </div>
+
+      <header class="date-topbar">
+        <button class="icon-btn" id="dateBackBtn" title="返回">←</button>
+        <div class="date-title-pill">
+          <strong id="dateTitle">去约会</strong>
+          <span id="dateStageName">客厅 · 平静</span>
+        </div>
+        <nav class="date-actions">
+          <button class="round-btn" id="dateLogBtn" title="记录" aria-label="记录">☰</button>
+          <button class="round-btn" id="dateMusicToggleBtn" title="点歌" aria-label="点歌">♫</button>
+          <button class="round-btn" id="dateVideoMuteBtn" title="视频声音" aria-label="视频声音">♪</button>
+          <button class="round-btn" id="dateSettingsBtn" title="设置" aria-label="设置">⚙</button>
+        </nav>
+      </header>
+
+      <div class="music-player" id="dateMusicPlayer" hidden>
+        <button id="dateMusicPlayBtn" class="mini-btn" title="播放">▶</button>
+        <div class="music-meta">
+          <strong id="dateMusicName">-</strong>
+          <span id="dateMusicArtist">-</span>
+        </div>
+        <input id="dateMusicSeek" type="range" min="0" max="1000" value="0" aria-label="歌曲进度">
+        <button id="dateMusicCloseBtn" class="mini-btn" title="关闭点歌">×</button>
+      </div>
+
+      <section class="date-session-picker" id="dateSessionPicker" hidden>
+        <div class="picker-head">
+          <strong>选择一场约会</strong>
+          <button class="primary-btn" id="dateCreateNewBtn" type="button">新的约会</button>
+        </div>
+        <div class="picker-list" id="dateEntryList"></div>
+        <p class="picker-empty" id="dateEntryEmpty" hidden>还没有保存的约会。</p>
+      </section>
+
+      <section class="dialogue-panel" id="dateDialoguePanel">
+        <div class="speaker-line">
+          <span class="speaker-name" id="dateSpeakerName">AI</span>
+          <span class="date-status" id="dateStatus"></span>
+        </div>
+        <div class="panel-tools">
+          <button class="mini-btn" id="dateEndBtn" title="结束约会" aria-label="结束约会">✓</button>
+          <button class="mini-btn" id="dateReplayTtsBtn" title="重听当前内容" aria-label="重听当前内容">🔊</button>
+          <button class="mini-btn" id="dateActionPickerBtn" title="切换人物动作" aria-label="切换人物动作">☷</button>
+          <button class="mini-btn" id="datePanelSizeBtn" title="展开文字面板" aria-label="展开文字面板">↕</button>
+        </div>
+        <div class="action-picker" id="dateActionPicker" hidden>
+          <div class="action-picker-list" id="dateActionPickerList"></div>
+          <p class="action-picker-empty" id="dateActionPickerEmpty" hidden>暂无动作</p>
+        </div>
+        <section class="date-planner" id="datePlanner">
+          <label class="planner-field">
+            <span>约会提示</span>
+            <textarea id="datePromptInput" rows="3" placeholder="比如：雨夜、旧唱片、久别重逢。"></textarea>
+          </label>
+          <div class="planner-actions">
+            <button class="primary-btn" id="dateGenerateOutlineBtn" type="button">生成大纲</button>
+            <button class="ghost-btn" id="dateStartBtn" type="button" hidden>开始约会</button>
+          </div>
+          <article class="outline-card" id="dateOutlineCard" hidden>
+            <strong id="dateOutlineTitle"></strong>
+            <p id="dateOutlineText"></p>
+            <span id="dateOutlineEnding"></span>
+          </article>
+        </section>
+        <section class="date-chat-area" id="dateChatArea" hidden>
+          <div class="dialogue-text" id="dateDialogueText">今晚从客厅开始。</div>
+          <form class="date-input-row" id="dateForm">
+            <textarea id="dateInput" rows="1" placeholder="输入回复..." autocomplete="off"></textarea>
+            <button id="dateSendBtn" type="submit" title="发送">➤</button>
+          </form>
+        </section>
+      </section>
+    </section>
+
+    <aside class="date-drawer" id="dateLogDrawer" aria-hidden="true">
+      <div class="drawer-head">
+        <strong>约会过程</strong>
+        <button class="mini-btn" id="dateLogCloseBtn">×</button>
+      </div>
+      <div class="log-stats" id="dateLogStats">剧情字数：0</div>
+      <div class="message-list" id="dateMessageList"></div>
+    </aside>
+
+    <section class="date-modal" id="dateSettingsModal" aria-hidden="true">
+      <div class="modal-sheet">
+        <div class="modal-head">
+          <strong>设置</strong>
+          <button class="mini-btn" id="dateSettingsCloseBtn">×</button>
+        </div>
+        <label class="field">
+          <span>模型</span>
+          <select id="dateModel"></select>
+        </label>
+        <label class="field">
+          <span>人设预设</span>
+          <select id="datePersonaPreset"></select>
+        </label>
+        <label class="field">
+          <span>人设</span>
+          <textarea id="datePersona" rows="5"></textarea>
+        </label>
+        <div class="preset-actions">
+          <button class="ghost-btn" id="datePresetNewBtn">新增</button>
+          <button class="ghost-btn" id="datePresetSaveBtn">保存当前</button>
+          <button class="ghost-btn danger" id="datePresetDeleteBtn">删除</button>
+        </div>
+        <div class="switch-row">
+          <label><input id="dateTtsToggle" type="checkbox"> TTS</label>
+          <select id="dateTtsVoice"></select>
+        </div>
+        <div class="switch-row">
+          <label><input id="dateMusicToggle" type="checkbox"> 点歌</label>
+          <input id="dateMusicVolume" type="range" min="0" max="100" value="25" aria-label="点歌音量">
+        </div>
+        <div class="switch-row">
+          <label><input id="dateVideoSoundToggle" type="checkbox"> 视频声音</label>
+          <input id="dateVideoVolume" type="range" min="0" max="100" value="40" aria-label="视频音量">
+        </div>
+        <button class="primary-btn" id="dateSaveSettingsBtn">保存</button>
+      </div>
+    </section>
+
+    <section class="date-modal" id="dateEndConfirmModal" aria-hidden="true">
+      <div class="modal-sheet confirm-sheet">
+        <div class="modal-head">
+          <strong>结束约会？</strong>
+          <button class="mini-btn" id="dateEndCancelBtn">×</button>
+        </div>
+        <p>真的要结束这场约会吗？结束后会生成标题和简短摘要，之后可以选择同步到某个私聊或群聊窗口。</p>
+        <div class="modal-actions">
+          <button class="ghost-btn" id="dateEndKeepBtn">再聊一会</button>
+          <button class="primary-btn" id="dateEndConfirmBtn">结束并总结</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="date-modal" id="dateEndModal" aria-hidden="true">
+      <div class="modal-sheet end-sheet">
+        <div class="modal-head">
+          <strong id="dateEndTitle">约会结束</strong>
+          <button class="mini-btn" id="dateEndCloseBtn">×</button>
+        </div>
+        <p id="dateEndSummary"></p>
+        <label class="sync-picker">
+          <span>同步到</span>
+          <select id="dateSyncTargetSelect"></select>
+        </label>
+        <p class="sync-target" id="dateSyncTarget"></p>
+        <div class="modal-actions">
+          <button class="ghost-btn" id="dateNewBtn">新的约会</button>
+          <button class="primary-btn" id="dateSyncBtn">同步到聊天</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/date_theater.js?v=20260629-date-theater-actions2"></script>
+</body>
+</html>

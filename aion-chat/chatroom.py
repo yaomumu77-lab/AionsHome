@@ -1031,8 +1031,9 @@ async def build_aion_group_context(
         whisper_mode=whisper_mode,
         include_private_whisper=True,
     )
-    history.append({"role": "user", "content": ability_block})
-    history.append({"role": "assistant", "content": "好的，需要时我会使用这些指令。"})
+    if ability_block:
+        history.append({"role": "user", "content": ability_block})
+        history.append({"role": "assistant", "content": "好的，需要时我会使用这些指令。"})
 
     # 3. 构建 recent_messages 用于 instant_digest
     merged = await fetch_merged_timeline("aion", context_limit, room_id=room_id)
@@ -1115,8 +1116,9 @@ async def build_connor_group_context(
         whisper_mode=whisper_mode,
         include_private_whisper=True,
     )
-    history.append({"role": "user", "content": ability_block})
-    history.append({"role": "assistant", "content": "好的，需要时我会使用这些指令。"})
+    if ability_block:
+        history.append({"role": "user", "content": ability_block})
+        history.append({"role": "assistant", "content": "好的，需要时我会使用这些指令。"})
 
     # 2. 构建 recent_messages 用于 instant_digest
     merged = await fetch_merged_timeline("connor", context_limit, room_id=room_id)
@@ -1203,9 +1205,11 @@ async def build_connor_1v1_context(
         messages.append({"role": "assistant", "content": "收到，我会记住用户的信息。"})
 
     ability_block = await build_ability_block(user_name, who="connor", whisper_mode=whisper_mode)
-    messages.append({"role": "user", "content": ability_block})
+    if ability_block:
+        messages.append({"role": "user", "content": ability_block})
     merged = await fetch_merged_timeline("connor", context_limit)
-    messages.append({"role": "assistant", "content": "好的，需要时我会使用这些指令。"})
+    if ability_block:
+        messages.append({"role": "assistant", "content": "好的，需要时我会使用这些指令。"})
 
     # 构建 recent_messages 用于 instant_digest（前置哨兵）
     recent_for_digest = []

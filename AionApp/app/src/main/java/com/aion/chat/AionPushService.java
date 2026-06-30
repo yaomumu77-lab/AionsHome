@@ -115,7 +115,7 @@ public class AionPushService extends Service {
     public static final String ACTION_REFRESH_CLOUDFLARE_AUTH = "refresh_cloudflare_auth";
 
     private static final String CH_KEEPALIVE = "aion_keepalive";
-    private static final String CH_MESSAGE   = "aion_message";
+    private static final String CH_MESSAGE   = "aion_message_heads_up_v2";
     private static final String CH_ALARM     = "aion_alarm";
 
     private static final int NOTIF_FOREGROUND = 1;
@@ -1523,7 +1523,7 @@ public class AionPushService extends Service {
                             String sender = data.optString("sender", "AI");
                             if (sender.isEmpty()) sender = "AI";
                             else sender = sender.substring(0, 1).toUpperCase() + sender.substring(1);
-                            showNotif(CH_ALARM, "💬 " + sender, c, true);
+                            showNotif(CH_MESSAGE, "💬 " + sender, c, true);
                         }
                     }
                     break;
@@ -1535,7 +1535,7 @@ public class AionPushService extends Service {
                             String c = data.optString("content", "");
                             if (c.length() > 100) c = c.substring(0, 100) + "...";
                             sender = sender.substring(0, 1).toUpperCase() + sender.substring(1);
-                            showNotif(CH_ALARM, "💬 " + sender, c, true);
+                            showNotif(CH_MESSAGE, "💬 " + sender, c, true);
                         }
                     }
                     break;
@@ -2162,8 +2162,10 @@ public class AionPushService extends Service {
         c1.setShowBadge(false);
         nm.createNotificationChannel(c1);
 
-        NotificationChannel c2 = new NotificationChannel(CH_MESSAGE, appName + " 消息",
-                NotificationManager.IMPORTANCE_DEFAULT);
+        NotificationChannel c2 = new NotificationChannel(CH_MESSAGE, appName + " 消息横幅",
+                NotificationManager.IMPORTANCE_HIGH);
+        c2.enableVibration(true);
+        c2.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
         nm.createNotificationChannel(c2);
 
         NotificationChannel c3 = new NotificationChannel(CH_ALARM, "闹铃与监控",

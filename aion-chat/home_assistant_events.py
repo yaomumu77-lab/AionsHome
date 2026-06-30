@@ -14,9 +14,7 @@ import logging
 import time
 from typing import Any
 
-from activity import append_activity_log, cleanup_old_activity_logs, read_recent_activity
 from config import BASE_DIR, load_worldbook
-from ws import manager
 
 log = logging.getLogger("home_assistant_events")
 
@@ -361,21 +359,6 @@ class HomeAssistantEventListener:
 
     async def _emit_sensor_event(self, payload: dict[str, Any], cfg: dict[str, Any]) -> None:
         await self._append_event_log(payload)
-        activity_entry = self._build_activity_entry(payload)
-        await manager.broadcast({"type": "home_sensor_event", "data": payload})
-        if not activity_entry:
-            return
-        if self._is_duplicate_activity_entry(activity_entry):
-            log.debug("Skipped duplicate home activity log: %s", activity_entry.get("title"))
-            return
-
-        append_activity_log(activity_entry)
-        self._last_activity_signature = self._activity_signature(activity_entry)
-        try:
-            cleanup_old_activity_logs()
-        except Exception:
-            pass
-        await manager.broadcast({"type": "activity_log", "data": activity_entry})
 
     def _is_duplicate_activity_entry(self, entry: dict[str, Any]) -> bool:
         signature = self._activity_signature(entry)

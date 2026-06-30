@@ -1507,6 +1507,12 @@ async function stepDiag() {
 }
 
 function handleHealthWs(msg) {
+  if (msg.type === 'health_share_changed') {
+    refreshHealthShareSetting();
+  }
+  if (msg.type === 'capability_config_changed' && msg.data && msg.data.key === 'health_context') {
+    refreshHealthShareSetting();
+  }
   if (msg.type === 'location_update' && msg.data) renderStepStatus(msg.data);
   if (msg.type === 'step_diag' && msg.info) {
     const el = $('stepDiagInfo');
@@ -1725,14 +1731,18 @@ async function toggleHealthShare(enabled) {
   await api('PUT', '/api/settings/health-share', { enabled });
 }
 
+async function refreshHealthShareSetting() {
+  try {
+    const r = await api('GET', '/api/settings/health-share');
+    const toggle = $('healthShareToggle');
+    if (toggle) toggle.checked = !!r.health_share_enabled;
+  } catch(e) {}
+}
+
 (async function init() {
   $('weightDate').value = todayStr();
   $('periodStart').value = todayStr();
-  // 加载健康分享开关状态
-  try {
-    const r = await api('GET', '/api/settings/health-share');
-    $('healthShareToggle').checked = !!r.health_share_enabled;
-  } catch(e) {}
+  await refreshHealthShareSetting();
   connectCommonWS(handleHealthWs);
   await loadHealth();
   if (navigator.userAgent.includes('AionChatApp')) {
@@ -1752,6 +1762,12 @@ async function toggleHealthShare(enabled) {
     }
   }
 })();
+
+window.addEventListener('focus', refreshHealthShareSetting);
+window.addEventListener('pageshow', refreshHealthShareSetting);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) refreshHealthShareSetting();
+});
 </script>
 </body>
 </html>

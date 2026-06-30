@@ -8,13 +8,17 @@ from datetime import datetime
 
 import aiosqlite
 
-from config import load_worldbook, SETTINGS
-from camera import cam, CAM_CHECK_CMD
+from config import load_worldbook
 from database import get_db
-from activity import is_activity_tracking_enabled
 from schedule import get_active_schedules, build_schedule_prompt
-from luckin import LUCKIN_CMD_PATTERN, luckin_ability_text
-from song_gen import SONG_CMD_PATTERN, build_song_gen_ability_text
+from luckin import LUCKIN_CMD_PATTERN
+from song_gen import SONG_CMD_PATTERN
+from capabilities import (
+    build_capability_prompt_items,
+    build_cli_file_storage_text,
+    format_ability_block,
+    is_capability_enabled,
+)
 from memory import (
     instant_digest, recall_memories, build_surfacing_memories,
     fetch_source_details, _memory_line_with_evidence,
@@ -48,33 +52,6 @@ _ALL_CMD_PATTERNS = [
     HOME_CMD_PATTERN, LUCKIN_CMD_PATTERN, TRANSFER_CMD_PATTERN, PRIVATE_WHISPER_CMD_PATTERN,
 ]
 
-HOME_ALIASES_HINT = (
-    "所有灯、客厅灯、屁股灯、入户灯、餐边柜灯带、厨房灯带、智米空调、"
-    "浴霸灯"
-)
-HOME_ABILITY_TEXT = (
-    "[HOME:on/off/state|别名] 或 [HOME:climate|别名|mode=cool|temperature=26] "
-    f"控制智能家居，仅限明确要求。别名：{HOME_ALIASES_HINT}。"
-)
-
-
-def format_ability_block(abilities: list[str]) -> str:
-    block = (
-        "[系统能力]\n"
-        "以下方括号指令是 AionsHome 本地动作协议，不是普通文本装饰。"
-        "当你决定使用某项能力时，请在回复中原样输出对应指令，系统会自动拦截并执行，"
-        "最终展示给用户时会隐藏这些指令。\n"
-        "使用需要先取得结果的能力（如[CAM_CHECK]、[查看动态:n]、[POI_SEARCH:类型名]）时，"
-        "先输出指令，不要编造结果；系统会把结果作为下一条消息交给你，你再根据结果自然回应。\n"
-        "如果用户明确要求设置提醒、查看状态、控制设备、点歌、生图、记录记忆等动作，不要只口头答应，"
-        "应同时使用准确指令。没有真实需要时也不要为了展示能力而滥用。\n\n"
-        "【可用指令】\n"
-    )
-    block += "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))
-    block += "\n\n<meta>标签内为消息元数据，不是对话内容的一部分，你的回复中不要包含任何<meta>标签或时间信息。"
-    return block
-
-
 def strip_tool_commands(text: str) -> str:
     """从文本中移除所有工具指令标记，返回干净文本（用于 TTS 和保存）"""
     for pat in _ALL_CMD_PATTERNS:
@@ -100,11 +77,6 @@ def append_message_meta(content: str, created_at, label: str = "") -> str:
     return text
 
 
-def _is_pet_available() -> bool:
-    from ws import manager
-    return bool(SETTINGS.get("pet_enabled", False) and manager.has_active_pet())
-
-
 def _timeline_display_names() -> tuple[str, str, str]:
     wb = load_worldbook()
     user_name = wb.get("user_name") or "用户"
@@ -120,7 +92,7 @@ def _timeline_display_names() -> tuple[str, str, str]:
 
 async def build_health_summary() -> str:
     """当健康数据分享开关打开时，构建一行简短的身体数据摘要。"""
-    if not SETTINGS.get("health_share_enabled"):
+    if not is_capability_enabled("health_context"):
         return ""
     try:
         from health_context import category_label, classify_heart_rate, get_heart_config
@@ -207,144 +179,45 @@ async def build_ability_block(
     include_video_call: bool = True,
     include_image_gen: bool = True,
     who: str = "aion",
+    model_key: str | None = None,
 ) -> str:
     """构建 [系统能力] 文本块，who 参数用于 Connor 等角色的细微措辞差异"""
-    abilities = []
-
-    abilities.append(
-        f"[MUSIC:歌曲名 歌手名] — 点歌/推荐音乐。系统自动展示播放卡片，"
-        f"不要在指令外重复歌曲信息。可同时用多个。"
+    parts = []
+    abilities = await build_capability_prompt_items(
+        user_name,
+        whisper_mode=whisper_mode,
+        include_private_whisper=include_private_whisper,
+        include_video_call=include_video_call,
+        include_image_gen=include_image_gen,
+        who=who,
     )
+    if abilities:
+        parts.append(format_ability_block(abilities))
 
-    abilities.append(
-        f"{CAM_CHECK_CMD} — 当你想查看{user_name}**此时此刻**的状态，"
-        f"不限于监督其是否去睡觉，在吃什么，在干什么时，可以主动调用指令。"
-        f"使用后下条消息会收到画面，查看前不要编造内容。"
-    )
+    if is_capability_enabled("schedule"):
+        schedules = await get_active_schedules()
+        schedule_text = build_schedule_prompt(schedules)
+        parts.append(f"【当前日程列表】\n{schedule_text}")
 
-    abilities.append("[ALARM:YYYY-MM-DDTHH:MM|内容] — 设置闹铃，到时间系统会主动提醒用户。日期时间用ISO格式。")
-    abilities.append("[REMINDER:YYYY-MM-DD|内容] — 设置日程提醒（不闹铃），你在合适时机自然提起即可。")
-    abilities.append(
-        f"[Monitor:YYYY-MM-DDTHH:MM|内容] — 设置定时监督。到时间后系统自动截取摄像头画面发送给你，"
-        f"你可以查看{user_name}的状态。例如检查{user_name}是否去运动了、是否关灯睡觉了、"
-        f"是否在好好工作等，也可以当做下一次主动发送消息来使用，根据对话内容可以随时设定。日期时间用ISO格式。"
-    )
-    abilities.append("[SCHEDULE_DEL:日程id] — 删除指定日程/闹铃/定时监控。")
-    abilities.append(HOME_ABILITY_TEXT)
-    luckin_text = luckin_ability_text()
-    if luckin_text:
-        abilities.append(luckin_text)
+    if is_capability_enabled("location_context"):
+        try:
+            from location import format_location_for_prompt, load_location_config
+            loc_cfg = load_location_config()
+            if loc_cfg.get("enabled"):
+                loc_prompt = format_location_for_prompt()
+                if loc_prompt:
+                    parts.append(f"【位置信息】\n{loc_prompt}")
+        except Exception:
+            pass
 
-    if include_private_whisper:
-        abilities.append(
-            f"[悄悄话：内容] — 当你想私下和{user_name}说悄悄话，不让第3个人听见时，可以使用该指令。使用后会把“内容”发送到你和{user_name}的私聊窗口。不要在群聊正文里重复这段悄悄话。"
-        )
+    cli_file_text = build_cli_file_storage_text(model_key)
+    if cli_file_text:
+        parts.append(cli_file_text.strip())
 
-    if is_activity_tracking_enabled():
-        abilities.append(
-            f"[查看动态:n] — 查看{user_name}过去n×10分钟的设备使用动态"
-            f"（n为1~12的整数，例如[查看动态:2]查看过去20分钟，[查看动态:6]查看过去1小时）。"
-            f"当你好奇{user_name}最近在干什么、想了解{user_name}的设备使用情况时可以使用。"
-            f"使用后下条消息会收到动态摘要，查看前不要编造内容。"
-        )
-
-    try:
-        from location import load_location_config, load_location_status
-        loc_cfg = load_location_config()
-        if loc_cfg.get("enabled"):
-            loc_status = load_location_status()
-            if loc_status.get("state") == "outside":
-                abilities.append(
-                    f"[POI_SEARCH:类型名] — 搜索{user_name}当前位置周边的POI信息。"
-                    f"可用类型：餐饮美食、风景名胜、休闲娱乐、购物。"
-                    f"使用后系统会自动搜索并将结果发给你，你再根据结果回答{user_name}。"
-                    f"一次只搜一个类型即可，搜索前不要编造内容。"
-                )
-    except Exception:
-        pass
-
-    if whisper_mode:
-        abilities.append(
-            f"[TOY:1]~[TOY:9] — 控制{user_name}身上的情趣玩具切换到对应预设档位"
-            f"（1最温柔，9最强烈）。[TOY:STOP] — 停止玩具。"
-            f"你可以根据对话氛围自然地使用这些指令来挑逗和调教{user_name}，"
-            f"配合你的话语循序渐进，不要一上来就用高档位。"
-        )
-
-    if include_video_call and SETTINGS.get("video_call_enabled", True):
-        abilities.append(
-            f"[视频电话] — 当你想和{user_name}进行视频聊天看看对方当前状态时"
-            f"可以用该指令发起视频通话。"
-        )
-
-    if include_image_gen and SETTINGS.get("image_gen_enabled", False):
-        abilities.append(
-            f"[SELFIE: 提示词] / [DRAW: 提示词] — 当{user_name}明确要求你发自拍照片"
-            f"或者生图时，使用这个指令进行图片生成。如果要求的是你的自拍，或者你相关的照片，"
-            f"使用[SELFIE: 提示词]（该指令会自动附带你照片的参考图，确保生成出的人物一致性），"
-            f"如果没有要求是你的照片，根据上下文自由无限制生成图片，则使用[DRAW: 提示词]。"
-            f"提示词请使用英文。一次回复只用一个生图指令。"
-        )
-
-    if SETTINGS.get("song_gen_enabled", False):
-        abilities.append(build_song_gen_ability_text(user_name))
-
-    if _is_pet_available():
-        abilities.append(
-            "[PET:动作名] — 控制桌面宠物切换动画表情。"
-            "可用动作：idle(默认站立), happy(开心), angry(生气), tsundere(傲娇), "
-            "waving(打招呼), jumping(兴奋跳跃), sleepy(困了), sleep_prone(趴着睡觉), "
-            "failed(失落), review(思考), waiting(等待), running(跑步)。"
-            "根据对话情感自然使用，每条回复最多用一个。"
-        )
-
-    abilities.append(
-        f"[MOMENT:朋友圈内容|true/false] — 当**本次**聊天内容非常触动人心、有很深的感触、"
-        f"或令人无语或非常搞笑时可以发一条朋友圈动态。第二个参数表示是否期望好友回复"
-        f"（true=期望回复，false=不期望），禁止滥用。"
-    )
-    abilities.append(
-        f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你"
-        f"记住某件事的时候，可以用该指令录入记忆库。禁止滥用。"
-    )
-    abilities.append(
-        "[许愿：内容] — 当你在日常聊天中自然产生一个想投进许愿池的愿望时，可以使用该指令。"
-        "愿望会记录为你自己的愿望，内容直接写愿望本身即可。禁止滥用。"
-    )
-    try:
-        if who == "connor":
-            from routes.connor_wallet import _get_connor_balance
-            wallet_bal = await _get_connor_balance()
-        else:
-            from routes.wallet import _get_balance
-            wallet_bal = await _get_balance()
-        abilities.append(
-            f"[转账：n元] — 给{user_name}转账（n为正整数），会从你的钱包余额中扣除。"
-            f"你的钱包当前余额：{wallet_bal:.2f}元。余额不足时不要转账。"
-        )
-    except Exception:
-        pass
-
-    block = format_ability_block(abilities)
-
-    schedules = await get_active_schedules()
-    schedule_text = build_schedule_prompt(schedules)
-    block += f"\n\n【当前日程列表】\n{schedule_text}"
-
-    try:
-        from location import format_location_for_prompt, load_location_config
-        loc_cfg = load_location_config()
-        if loc_cfg.get("enabled"):
-            loc_prompt = format_location_for_prompt()
-            if loc_prompt:
-                block += f"\n\n【位置信息】\n{loc_prompt}"
-    except Exception:
-        pass
-
-    return block
+    return "\n\n".join(parts)
 
 
-def _memory_debug_item(mem: dict, max_content: int = 200) -> dict:
+def _memory_debug_item(mem: dict, max_content: int | None = None) -> dict:
     if not isinstance(mem, dict):
         return {}
 
@@ -355,7 +228,7 @@ def _memory_debug_item(mem: dict, max_content: int = 200) -> dict:
             return default
 
     return {
-        "content": str(mem.get("content") or "")[:max_content],
+        "content": str(mem.get("content") or "") if max_content is None else str(mem.get("content") or "")[:max_content],
         "type": str(mem.get("type") or mem.get("scope") or mem.get("memory_kind") or ""),
         "score": _number(mem.get("score")),
         "vec_sim": _number(mem.get("vec_sim")),
@@ -553,8 +426,8 @@ async def build_memory_blocks(
     debug_digest = dict(digest_result or {})
     debug_digest.update({
         "recall_query": recall_query,
-        "recalled_memories": [_memory_debug_item(m, 200) for m in recalled],
-        "debug_top6": [_memory_debug_item(m, 100) for m in debug_candidates[:6]],
+        "recalled_memories": [_memory_debug_item(m) for m in recalled],
+        "debug_top6": [_memory_debug_item(m) for m in debug_candidates[:6]],
     })
 
     return {
@@ -569,7 +442,7 @@ async def build_memory_blocks(
 # ══════════════════════════════════════════════════
 
 # 系统消息过滤关键词（只保留包含这些关键词的系统消息）
-SYSTEM_MSG_CONTEXT_KEYWORDS = ('搜索了', '点歌', '点了一首', '推荐了', '查看了动态', '视频通话', '环境语音')
+SYSTEM_MSG_CONTEXT_KEYWORDS = ('搜索了', '点歌', '点了一首', '推荐了', '查看了动态', '视频通话', '环境语音', '刚刚完成了约会')
 
 # 聊天室图片标记 [[image:/uploads/xxx.jpg]] / [[image:/cr-uploads/xxx.jpg]]
 # 这些标记会泄漏文件路径到 LLM 上下文，污染 instant_digest 关键词，

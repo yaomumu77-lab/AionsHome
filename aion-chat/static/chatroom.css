@@ -359,10 +359,31 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
 
 .msg-body {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+.message-row.user .msg-body { align-items: flex-end; }
+
+.message-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.message-row.user .message-stack { align-items: flex-end; }
+.message-unit {
+  display: flex;
   gap: 6px;
   align-items: flex-start;
 }
-.message-row.user .msg-body { flex-direction: row-reverse; }
+.message-row.user .message-unit { flex-direction: row-reverse; }
+.unit-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  align-items: flex-start;
+}
+.message-row.user .unit-content { align-items: flex-end; }
 
 .msg-avatar-col {
   position: relative;
@@ -383,19 +404,17 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
 .tts-replay-btn.playing { opacity:1; animation: ttsGlow 1s ease-in-out infinite alternate; }
 @keyframes ttsGlow { from { opacity:0.7; } to { opacity:1; } }
 .memory-record-hint {
-  position: absolute;
-  bottom: -14px;
-  left: 50%;
-  transform: translateX(-50%);
+  border: none;
+  background: transparent;
+  padding: 1px;
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
-  opacity: 0;
-  animation: memHintIn 0.3s ease forwards;
-  z-index: 2;
+  opacity: .62;
+  transition: opacity .15s, transform .15s;
   filter: drop-shadow(0 1px 2px rgba(0,0,0,0.16));
 }
-.memory-record-hint:hover { transform: translateX(-50%) scale(1.2); }
+.memory-record-hint:hover { opacity: 1; transform: scale(1.15); }
 @keyframes memHintIn { from { opacity: 0; } to { opacity: 1; } }
 .mr-card-overlay {
   position: fixed;
@@ -445,6 +464,7 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
 .msg-content {
   display: flex;
   flex-direction: column;
+  gap: 4px;
   min-width: 0;
 }
 .message-row.user .msg-content { align-items: flex-end; }
@@ -457,6 +477,41 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
   line-height: 1.4;
   word-break: break-word;
   white-space: pre-wrap;
+}
+.inner-monologue {
+  color: var(--text3);
+  font-size: .82em;
+  opacity: .9;
+}
+.inner-monologue::before {
+  content: "💭 ";
+  opacity: .85;
+}
+.inner-monologue-line {
+  color: var(--text3);
+  font-size: 12px;
+  line-height: 1.45;
+  opacity: .9;
+  padding: 1px 8px;
+  margin-left: 34px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.unit-content > .inner-monologue-line {
+  margin-left: 0;
+  margin-right: 0;
+  padding: 0 4px 4px;
+}
+.message-row.user .inner-monologue-line {
+  margin-left: 0;
+  margin-right: 34px;
+}
+.message-row.user .unit-content > .inner-monologue-line {
+  margin-right: 0;
+}
+.inner-monologue-line::before {
+  content: "💭 ";
+  opacity: .85;
 }
 .bubbles {
   display: flex;
@@ -521,6 +576,12 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
   transition: opacity 0.15s;
 }
 .message-row:hover .msg-menu-btn {
+  opacity: 1;
+}
+.message-unit.empty-message .bubble {
+  display: none;
+}
+.message-unit.empty-message .msg-menu-btn {
   opacity: 1;
 }
 .msg-menu-btn:hover {
@@ -1050,10 +1111,12 @@ body[data-theme="light"] .plus-menu-item {
 }
 .cr-syslog-overlay.show { display: flex; }
 .cr-syslog-modal {
-  width: min(680px, 96vw);
-  max-height: 85vh;
+  width: min(1100px, 96vw);
+  height: min(92vh, 900px);
+  max-height: 92vh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -1063,9 +1126,10 @@ body[data-theme="light"] .plus-menu-item {
 .cr-syslog-modal h3 { margin: 0 0 8px; font-size: 17px; }
 .cr-syslog-count { font-size: 11px; color: var(--text3); margin-bottom: 6px; }
 .cr-syslog-list {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
-  max-height: 64vh;
+  max-height: none;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg);
@@ -1108,8 +1172,7 @@ body[data-theme="light"] .plus-menu-item {
   background: var(--surface2);
   padding: 8px;
   font-size: 11px;
-  max-height: 42vh;
-  overflow-y: auto;
+  overflow: visible;
 }
 .cr-syslog-detail.show { display: block; }
 .cr-syslog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
@@ -1123,18 +1186,30 @@ body[data-theme="light"] .plus-menu-item {
 .debug-mem-item .score { color: #ffb86c; font-weight: 600; min-width: 48px; }
 .debug-mem-item .score-detail { color: var(--text3); font-size: 11px; min-width: 180px; }
 .debug-mem-item .type { color: var(--accent); min-width: 90px; }
-.debug-mem-item .content { color: var(--text); flex: 1; min-width: 180px; }
+.debug-mem-item .content { color: var(--text); flex: 1; min-width: 180px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .debug-mem-item.below-threshold { opacity: 0.6; }
 .debug-mem-item .threshold-tag { color: #f44336; font-size: 10px; font-weight: 600; margin-left: 6px; }
-.debug-recall-query { background: var(--surface); padding: 6px 10px; border-radius: 6px; color: #4fc3f7; font-size: 12px; margin-bottom: 6px; word-break: break-all; }
+.debug-recall-query { background: var(--surface); padding: 6px 10px; border-radius: 6px; color: #4fc3f7; font-size: 12px; margin-bottom: 6px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .debug-recall-keywords { color: var(--text2); font-size: 11px; margin-bottom: 8px; }
-.debug-prompt-list { max-height: 40vh; overflow-y: auto; }
+.debug-prompt-list { overflow: visible; }
 .debug-prompt-item { padding: 4px 0; border-bottom: 1px solid var(--border); }
 .debug-prompt-item:last-child { border-bottom: none; }
 .debug-prompt-role { display: inline-block; min-width: 70px; font-weight: 600; }
 .debug-prompt-role.user { color: var(--accent); }
 .debug-prompt-role.assistant { color: #81c784; }
 .debug-prompt-text { color: var(--text2); word-break: break-word; white-space: pre-wrap; }
+.cr-syslog-detail .debug-prompt-list,
+.cr-syslog-detail .debug-prompt-item,
+.cr-syslog-detail .debug-prompt-text,
+.cr-syslog-detail .debug-mem-item,
+.cr-syslog-detail .debug-mem-item .content,
+.cr-syslog-detail .debug-recall-query {
+  max-height: none;
+  overflow: visible;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 @keyframes cr-syslog-flash-red {
   0%, 100% { box-shadow: 0 0 4px rgba(244,67,54,0.3); background: rgba(244,67,54,0.15); }
   50% { box-shadow: 0 0 12px rgba(244,67,54,0.7); background: rgba(244,67,54,0.3); }
@@ -2786,6 +2861,49 @@ body[data-theme="light"] .sender-label.aion {
     0 0 18px rgba(89,154,255,0.18),
     0 10px 26px rgba(0,0,0,0.15);
 }
+.date-summary-card {
+  width: min(280px, 72vw);
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid rgba(247, 202, 132, 0.44);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.13), rgba(255,255,255,0.03)),
+    linear-gradient(145deg, rgba(78, 43, 102, 0.66), rgba(30, 49, 92, 0.62));
+  box-shadow: 0 12px 28px rgba(0,0,0,0.20), inset 0 1px 0 rgba(255,255,255,0.16);
+  color: var(--text);
+  text-align: left;
+  backdrop-filter: blur(12px) saturate(1.25);
+  -webkit-backdrop-filter: blur(12px) saturate(1.25);
+}
+.date-summary-kicker {
+  color: rgba(255, 225, 172, 0.88);
+  font-size: 11px;
+  line-height: 1.2;
+  margin-bottom: 4px;
+}
+.date-summary-title {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.35;
+  margin-bottom: 6px;
+}
+.date-summary-text {
+  color: var(--text2);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+body[data-theme="light"] .date-summary-card {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.82), rgba(255,255,255,0.58)),
+    linear-gradient(145deg, rgba(255, 241, 215, 0.90), rgba(229, 241, 255, 0.90));
+  border-color: rgba(218, 157, 85, 0.34);
+  box-shadow: 0 10px 24px rgba(80,94,130,0.12), inset 0 1px 0 rgba(255,255,255,0.86);
+}
+body[data-theme="light"] .date-summary-kicker { color: #9b6536; }
+body[data-theme="light"] .date-summary-text { color: #42506d; }
 body[data-theme="light"] .bubble {
   color: #15235f;
   text-shadow: none;

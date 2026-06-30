@@ -197,6 +197,8 @@ def sanitize_filename(name):
 
 # ── 模型配置 ─────────────────────────────────────
 CUSTOM_OPENAI_PROVIDER = "custom_openai"
+DEPRECATED_MODEL_PROVIDERS = {"gemini_cli", "antigravity_cli"}
+DEPRECATED_MODEL_KEYS = {"CLI-3.1pro", "AGY-3.1pro"}
 
 BUILTIN_MODELS = {
     "硅基GLM-5.2":      {"provider": "siliconflow", "model": "zai-org/GLM-5.2", "vision": False},
@@ -208,6 +210,7 @@ BUILTIN_MODELS = {
     # ChatGPT-auth Codex does not support some Codex-only defaults, so pin a
     # model that works after account switches..
     "Codex":            {"provider": "codex_cli",  "model": "gpt-5.5", "vision": True},
+    "CLI-3.1pro":       {"provider": "gemini_cli", "model": "gemini-3.1-pro-preview", "vision": True},
 }
 
 
@@ -291,6 +294,31 @@ MODELS = {}
 refresh_custom_models()
 
 DEFAULT_MODEL = "Gemini-3.5-flash"
+
+
+def is_model_deprecated(model_key: str | dict | None) -> bool:
+    if isinstance(model_key, dict):
+        return (model_key.get("provider") or "") in DEPRECATED_MODEL_PROVIDERS
+    key = _clean_text(model_key)
+    if key in DEPRECATED_MODEL_KEYS:
+        return True
+    return (MODELS.get(key) or {}).get("provider", "") in DEPRECATED_MODEL_PROVIDERS
+
+
+def iter_visible_models():
+    for key, cfg in MODELS.items():
+        if not is_model_deprecated(key):
+            yield key, cfg
+
+
+def resolve_model_key(model_key: str | None) -> str:
+    candidates = [_clean_text(model_key), _clean_text(DEFAULT_MODEL)]
+    for key in candidates:
+        if key in MODELS and not is_model_deprecated(key):
+            return key
+    for key, _cfg in iter_visible_models():
+        return key
+    return candidates[0] or candidates[1]
 
 # ── 摄像头默认配置 ───────────────────────────────
 DEFAULT_CAM_CFG = {

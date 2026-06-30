@@ -96,6 +96,8 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
 .msg-dots { background:none; border:none; color:var(--text3); font-size:14px; cursor:pointer; padding:0 4px; line-height:1; display:none; }
 .msg-dots:hover { color:var(--text); }
 .msg-row:hover .msg-dots { display:inline; }
+.msg-row.empty-message .msg-dots { display:inline; }
+.empty-msg-bubble { display:none; }
 .msg-feedback-actions { display:inline-flex; align-items:center; gap:1px; opacity:.28; transition:opacity .15s; }
 .msg-row:hover .msg-feedback-actions { opacity:.78; }
 .msg-feedback-btn { width:18px; height:18px; padding:0; border:none; border-radius:4px; background:transparent; color:var(--text3); font-size:11px; line-height:18px; cursor:pointer; }
@@ -149,6 +151,18 @@ body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-se
 .msg-bubble { padding: 10px 14px; border-radius: 14px; font-size: 15px; line-height: 1.65; word-break: break-word; color: #1a1a1a; font-weight: 450; }
 .msg-row.user .msg-bubble { background: linear-gradient(145deg, #e7cece 0%, #e7cece 100%); border-bottom-right-radius: 4px; border: 1px solid rgba(248,187,208,0.5); box-shadow: inset 0 2px 4px rgba(255,255,255,0.5), inset 0 -2px 4px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.1); }
 .msg-row.assistant .msg-bubble { background: linear-gradient(145deg, #bccbbb 0%, #bccbbb 100%); border: 1px solid rgba(165,214,140,0.5); border-bottom-left-radius: 4px; box-shadow: inset 0 2px 4px rgba(255,255,255,0.5), inset 0 -2px 4px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.1); }
+.inner-monologue { color: var(--text3); font-size: .82em; opacity: .9; }
+.inner-monologue::before { content: "💭 "; opacity: .85; }
+.inner-monologue-line {
+  color: var(--text3);
+  font-size: 12px;
+  line-height: 1.45;
+  opacity: .9;
+  padding: 1px 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.inner-monologue-line::before { content: "💭 "; opacity: .85; }
 .msg-bubbles { display:flex; flex-direction:column; gap:3px; }
 .msg-row.user .msg-bubbles { align-items:flex-end; }
 .msg-row.assistant .msg-bubbles { align-items:flex-start; }
@@ -759,12 +773,12 @@ body[data-theme="light"] .msg-row.system .system-notice { background: rgba(0,0,0
 .debug-mem-item .score { color:#e65100; font-weight:600; min-width:48px; }
 .debug-mem-item .score-detail { color:#888; font-size:11px; min-width:180px; }
 .debug-mem-item .type { color:var(--accent); min-width:100px; }
-.debug-mem-item .content { color:var(--text); flex:1; min-width:200px; }
+.debug-mem-item .content { color:var(--text); flex:1; min-width:200px; white-space:pre-wrap; overflow-wrap:anywhere; }
 .debug-mem-item.below-threshold { opacity:0.6; }
 .debug-mem-item .threshold-tag { color:#f44336; font-size:10px; font-weight:600; margin-left:6px; }
 .debug-recall-query { background:var(--bg-secondary, #1a1a2e); padding:6px 10px; border-radius:6px; color:#4fc3f7; font-size:12px; margin-bottom:6px; word-break:break-all; }
 .debug-recall-keywords { color:#aaa; font-size:11px; margin-bottom:8px; }
-.debug-prompt-list { max-height:40vh; overflow-y:auto; }
+.debug-prompt-list { overflow:visible; }
 .debug-prompt-item { padding:4px 0; border-bottom:1px solid var(--border); }
 .debug-prompt-item:last-child { border-bottom:none; }
 .debug-prompt-role { display:inline-block; min-width:70px; font-weight:600; }
@@ -773,8 +787,8 @@ body[data-theme="light"] .msg-row.system .system-notice { background: rgba(0,0,0
 .debug-prompt-text { color:var(--text2); word-break:break-word; white-space:pre-wrap; }
 
 /* ── 系统日志面板 ── */
-.syslog-modal { max-width:650px; max-height:85vh; display:flex; flex-direction:column; }
-.syslog-list { flex:1; overflow-y:auto; max-height:65vh; border:1px solid var(--border); border-radius:8px; background:var(--bg); padding:4px; }
+.syslog-modal { width:min(1100px,96vw); max-width:1100px; height:min(92vh,900px); max-height:92vh; display:flex; flex-direction:column; overflow:hidden; }
+.syslog-list { flex:1 1 auto; min-height:0; overflow-y:auto; max-height:none; border:1px solid var(--border); border-radius:8px; background:var(--bg); padding:4px; }
 .syslog-empty { padding:24px; text-align:center; color:var(--text3); font-size:14px; }
 .syslog-entry { padding:8px 10px; border-bottom:1px solid var(--border); font-size:12px; line-height:1.6; }
 .syslog-entry:last-child { border-bottom:none; }
@@ -785,8 +799,20 @@ body[data-theme="light"] .msg-row.system .system-notice { background: rgba(0,0,0
 .syslog-mem.none { color:var(--text3); opacity:0.5; }
 .syslog-detail-toggle { background:none; border:1px solid var(--border); color:var(--text3); border-radius:4px; padding:1px 6px; font-size:10px; cursor:pointer; margin-left:6px; }
 .syslog-detail-toggle:hover { color:var(--text); border-color:var(--text2); }
-.syslog-detail { display:none; margin-top:6px; border:1px solid var(--border); border-radius:6px; background:var(--surface2); padding:8px; font-size:11px; max-height:40vh; overflow-y:auto; }
+.syslog-detail { display:none; margin-top:6px; border:1px solid var(--border); border-radius:6px; background:var(--surface2); padding:10px; font-size:11px; overflow:visible; }
 .syslog-detail.show { display:block; }
+.syslog-detail .debug-prompt-list,
+.syslog-detail .debug-prompt-item,
+.syslog-detail .debug-prompt-text,
+.syslog-detail .debug-mem-item,
+.syslog-detail .debug-mem-item .content,
+.syslog-detail .debug-recall-query {
+  max-height:none;
+  overflow:visible;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  word-break:break-word;
+}
 .syslog-count { font-size:11px; color:var(--text3); margin-bottom:4px; }
 /* ── 系统日志按钮闪红 ── */
 @keyframes syslog-flash-red {
@@ -1899,6 +1925,49 @@ body[data-theme="light"] .plus-menu-item { text-shadow: none; }
   color: rgba(255,255,255,0.7);
   margin-top: -2px;
 }
+.date-summary-card {
+  width: min(280px, 72vw);
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid rgba(247, 202, 132, 0.44);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.13), rgba(255,255,255,0.03)),
+    linear-gradient(145deg, rgba(78, 43, 102, 0.66), rgba(30, 49, 92, 0.62));
+  box-shadow: 0 12px 28px rgba(0,0,0,0.20), inset 0 1px 0 rgba(255,255,255,0.16);
+  color: var(--text);
+  text-align: left;
+  backdrop-filter: blur(12px) saturate(1.25);
+  -webkit-backdrop-filter: blur(12px) saturate(1.25);
+}
+.date-summary-kicker {
+  color: rgba(255, 225, 172, 0.88);
+  font-size: 11px;
+  line-height: 1.2;
+  margin-bottom: 4px;
+}
+.date-summary-title {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.35;
+  margin-bottom: 6px;
+}
+.date-summary-text {
+  color: var(--text2);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+body[data-theme="light"] .date-summary-card {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.82), rgba(255,255,255,0.58)),
+    linear-gradient(145deg, rgba(255, 241, 215, 0.90), rgba(229, 241, 255, 0.90));
+  border-color: rgba(218, 157, 85, 0.34);
+  box-shadow: 0 10px 24px rgba(80,94,130,0.12), inset 0 1px 0 rgba(255,255,255,0.86);
+}
+body[data-theme="light"] .date-summary-kicker { color: #9b6536; }
+body[data-theme="light"] .date-summary-text { color: #42506d; }
 .msg-bubble:has(.transfer-card),
 .msg-row.user .msg-bubble:has(.transfer-card),
 .msg-row.assistant .msg-bubble:has(.transfer-card) {

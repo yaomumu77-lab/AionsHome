@@ -10,7 +10,7 @@ import aiosqlite
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
-from config import DEFAULT_MODEL, SETTINGS, load_worldbook
+from config import DEFAULT_MODEL, SETTINGS, load_worldbook, resolve_model_key
 from database import get_db
 from ws import manager as ws_manager
 from ai_providers import (
@@ -98,6 +98,7 @@ def _normalize_attachments(raw: Any) -> list:
 
 
 async def _prepare_moment_messages_for_model(messages: list[dict], model_key: str) -> list[dict]:
+    model_key = resolve_model_key(model_key)
     cfg = MODELS.get(model_key) or {}
     provider = str(cfg.get("provider") or "")
     key = str(model_key or "").strip().lower()
@@ -392,7 +393,7 @@ async def _ai_reply_to_moment(who: str, moment_id: str, target_comment_id: str =
                     "SELECT model FROM conversations ORDER BY updated_at DESC LIMIT 1"
                 )
                 _row = await _cur.fetchone()
-            _model = _row["model"] if _row else DEFAULT_MODEL
+            _model = resolve_model_key(_row["model"] if _row else DEFAULT_MODEL)
             _temp = SETTINGS.get("temperature")
             model_messages = await _prepare_moment_messages_for_model(messages, _model)
             async for chunk in stream_ai(model_messages, _model, temperature=_temp):

@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import tempfile
 
-from config import get_key, MODELS, UPLOADS_DIR, CODEX_UPLOADS_DIR, SETTINGS, get_sentinel_config, DATA_DIR
+from config import get_key, MODELS, UPLOADS_DIR, CODEX_UPLOADS_DIR, SETTINGS, get_sentinel_config, DATA_DIR, resolve_model_key, is_model_deprecated
 
 # CLI 状态前缀：yield 此前缀的 chunk 会被 _bg_generate 拦截为状态事件，不送入 TTS 和正文
 CLI_STATUS_PREFIX = "\x00CLI_STATUS:"
@@ -20,6 +20,120 @@ _ANTIGRAVITY_TIMEOUT_NOTICE_RE = re.compile(
 )
 MODEL_RAW_RESPONSE_DIR = DATA_DIR / "model_raw_responses"
 MODEL_RAW_RESPONSE_RETENTION_SECONDS = 3 * 24 * 60 * 60
+THINK_TAG_OPEN = "<think>"
+THINK_TAG_CLOSE = "</think>"
+_THINK_TAG_RE = re.compile(r"<think>([\s\S]*?)</think>", re.IGNORECASE)
+
+
+def _tag_prefix_suffix_len(text: str, tag: str) -> int:
+    max_len = min(len(text), len(tag) - 1)
+    for size in range(max_len, 0, -1):
+        if tag.startswith(text[-size:]):
+            return size
+    return 0
+
+
+def extract_think_tag_reasoning(text: str, existing_reasoning: str = "") -> tuple[str, str]:
+    """Move standard <think>...</think> blocks from visible text into reasoning."""
+    original = text or ""
+    existing = (existing_reasoning or "").strip()
+    if not original or not _THINK_TAG_RE.search(original):
+        return original, existing
+
+    reasoning_parts: list[str] = []
+
+    def _remove(match: re.Match) -> str:
+        inner = (match.group(1) or "").strip()
+        if inner:
+            reasoning_parts.append(inner)
+        return "\n\n"
+
+    visible = _THINK_TAG_RE.sub(_remove, original)
+    visible = re.sub(r"[ \t]+\n", "\n", visible)
+    visible = re.sub(r"\n[ \t]+", "\n", visible)
+    visible = re.sub(r"\n{3,}", "\n\n", visible).strip()
+    extracted = "\n\n".join(part for part in reasoning_parts if part).strip()
+    reasoning = "\n\n".join(part for part in (existing, extracted) if part).strip()
+    return visible, reasoning
+
+
+class ThinkTagReasoningFilter:
+    """Streaming filter for relay providers that send reasoning as <think> tags."""
+
+    def __init__(self, meta: dict | None = None):
+        self.meta = meta
+        self.pending = ""
+        self.in_think = False
+
+    def _append_reasoning(self, text: str) -> None:
+        if self.meta is None or not text:
+            return
+        current = str(self.meta.get("reasoning_content") or "")
+        self.meta["reasoning_content"] = current + text
+
+    def feed(self, chunk: str) -> str:
+        if not chunk:
+            return ""
+
+        buf = self.pending + str(chunk)
+        self.pending = ""
+        out: list[str] = []
+
+        while buf:
+            lower = buf.lower()
+            if self.in_think:
+                close_idx = lower.find(THINK_TAG_CLOSE)
+                if close_idx >= 0:
+                    self._append_reasoning(buf[:close_idx])
+                    buf = buf[close_idx + len(THINK_TAG_CLOSE):]
+                    self.in_think = False
+                    continue
+
+                keep = _tag_prefix_suffix_len(lower, THINK_TAG_CLOSE)
+                if keep:
+                    self._append_reasoning(buf[:-keep])
+                    self.pending = buf[-keep:]
+                else:
+                    self._append_reasoning(buf)
+                break
+
+            open_idx = lower.find(THINK_TAG_OPEN)
+            if open_idx >= 0:
+                out.append(buf[:open_idx])
+                buf = buf[open_idx + len(THINK_TAG_OPEN):]
+                self.in_think = True
+                continue
+
+            keep = _tag_prefix_suffix_len(lower, THINK_TAG_OPEN)
+            if keep:
+                out.append(buf[:-keep])
+                self.pending = buf[-keep:]
+            else:
+                out.append(buf)
+            break
+
+        return "".join(out)
+
+    def flush(self) -> str:
+        pending = self.pending
+        self.pending = ""
+        if not pending:
+            return ""
+        if self.in_think:
+            self._append_reasoning(pending)
+            return ""
+        return pending
+
+
+def _decode_relay_body(body: bytes) -> str:
+    return (body or b"").decode("utf-8", errors="replace")
+
+
+def _openai_sse_data(line: str) -> str | None:
+    if not line.startswith("data:"):
+        return None
+    return line.split(":", 1)[1].strip()
+
 
 # Gemini CLI 内部思考/工具痕迹清洗：
 # Gemini 3 在 agent 模式下处理图片时，可能把内部思考链（image_description / thought / Footnote / 系统指令）
@@ -249,12 +363,18 @@ def build_multimodal_messages(history: list):
             for att in attachments:
                 fpath = _resolve_attachment_path(att)
                 if fpath.exists():
-                    mime = mimetypes.guess_type(str(fpath))[0] or "image/jpeg"
+                    mime = mimetypes.guess_type(str(fpath))[0] or "application/octet-stream"
                     b64 = base64.b64encode(fpath.read_bytes()).decode()
                     if mime.startswith("image/"):
                         parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
-                    elif mime.startswith("video/"):
-                        parts.append({"type": "video_url", "video_url": {"url": f"data:{mime};base64,{b64}"}})
+                    else:
+                        parts.append({
+                            "type": "text",
+                            "text": (
+                                f"[Attachment not sent inline: {fpath.name} ({mime}). "
+                                "OpenAI-compatible relay payloads only include text and image_url parts.]"
+                            ),
+                        })
             result.append({"role": m["role"], "content": parts if parts else m["content"]})
         else:
             result.append({"role": m["role"], "content": m["content"]})
@@ -395,33 +515,33 @@ async def call_aipro(messages: list, model: str, meta: dict | None = None, tempe
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()
-                try:
-                    err = json.loads(body).get("error", {}).get("message", body.decode())
-                except:
-                    err = body.decode(errors="replace")[:500]
-                yield f"[中转站错误 {resp.status_code}] {err}"
+                yield _decode_relay_body(body)
                 return
             async for line in resp.aiter_lines():
-                if line.startswith("data: "):
-                    data = line[6:]
-                    if data.strip() == "[DONE]":
+                data = _openai_sse_data(line)
+                if data is None:
+                    continue
+                if data == "[DONE]":
+                    return
+                try:
+                    chunk = json.loads(data)
+                    if isinstance(chunk, dict) and chunk.get("error"):
+                        yield data
                         return
-                    try:
-                        chunk = json.loads(data)
-                        if meta is not None and "usage" in chunk and chunk["usage"]:
-                            u = chunk["usage"]
-                            meta["prompt_tokens"] = u.get("prompt_tokens", 0)
-                            meta["completion_tokens"] = u.get("completion_tokens", 0)
-                            meta["total_tokens"] = u.get("total_tokens", 0)
-                            meta["raw"] = u
-                        delta = chunk["choices"][0].get("delta", {}) if chunk.get("choices") else {}
-                        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-                        if meta is not None and reasoning:
-                            meta["reasoning_content"] = meta.get("reasoning_content", "") + str(reasoning)
-                        if "content" in delta and delta["content"]:
-                            yield delta["content"]
-                    except:
-                        pass
+                    if meta is not None and "usage" in chunk and chunk["usage"]:
+                        u = chunk["usage"]
+                        meta["prompt_tokens"] = u.get("prompt_tokens", 0)
+                        meta["completion_tokens"] = u.get("completion_tokens", 0)
+                        meta["total_tokens"] = u.get("total_tokens", 0)
+                        meta["raw"] = u
+                    delta = chunk["choices"][0].get("delta", {}) if chunk.get("choices") else {}
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                    if meta is not None and reasoning:
+                        meta["reasoning_content"] = meta.get("reasoning_content", "") + str(reasoning)
+                    if "content" in delta and delta["content"]:
+                        yield delta["content"]
+                except:
+                    pass
 
 
 def _openai_chat_completions_url(base_url: str) -> str:
@@ -456,21 +576,19 @@ async def call_custom_openai(messages: list, cfg: dict, meta: dict | None = None
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()
-                try:
-                    err = json.loads(body).get("error", {}).get("message", body.decode())
-                except:
-                    err = body.decode(errors="replace")[:500]
-                route_name = cfg.get("route_name") or "自定义中转站"
-                yield f"[{route_name}错误 {resp.status_code}] {err}"
+                yield _decode_relay_body(body)
                 return
             async for line in resp.aiter_lines():
-                if not line.startswith("data:"):
+                data = _openai_sse_data(line)
+                if data is None:
                     continue
-                data = line.split(":", 1)[1].strip()
                 if data == "[DONE]":
                     return
                 try:
                     chunk = json.loads(data)
+                    if isinstance(chunk, dict) and chunk.get("error"):
+                        yield data
+                        return
                     if meta is not None and chunk.get("usage"):
                         u = chunk["usage"]
                         meta["prompt_tokens"] = u.get("prompt_tokens", 0)
@@ -1601,6 +1719,7 @@ async def simple_ai_call(
     trace_label: str = "simple_ai_call",
 ) -> str:
     """收集 stream_ai 的全部 chunk并留存三天原始响应，返回过滤状态行后的正文。"""
+    model_key = resolve_model_key(model_key)
     started_at = time.time()
     full_text = ""
     raw_chunks = []
@@ -1713,6 +1832,7 @@ async def _sentinel_describe_images(messages: list) -> list:
 
 # ── 统一调度 ──────────────────────────────────────
 async def stream_ai(messages: list, model_key: str, meta: dict | None = None, temperature: float | None = None, max_tokens: int | None = None, cancel_event=None):
+    model_key = resolve_model_key(model_key)
     normalized = []
     for m in messages:
         nm = dict(m)
@@ -1725,43 +1845,50 @@ async def stream_ai(messages: list, model_key: str, meta: dict | None = None, te
     if not cfg:
         yield f"[错误] 未知模型: {model_key}"
         return
+    if is_model_deprecated(model_key):
+        yield f"[错误] 模型线路已停用: {model_key}"
+        return
 
     # 非视觉模型 + 消息含图片 → 哨兵代看
     if not cfg.get("vision", True) and _messages_have_images(normalized):
         yield f"{CLI_STATUS_PREFIX}哨兵模型正在识别图片内容..."
         normalized = await _sentinel_describe_images(normalized)
-    if cfg["provider"] == "siliconflow":
-        async for chunk in call_siliconflow(normalized, cfg["model"], meta, temperature, max_tokens):
-            if cancel_event and cancel_event.is_set():
-                return
+    async def _raw_chunks():
+        if cfg["provider"] == "siliconflow":
+            async for chunk in call_siliconflow(normalized, cfg["model"], meta, temperature, max_tokens):
+                yield chunk
+        elif cfg["provider"] == "gemini":
+            async for chunk in call_gemini(normalized, cfg["model"], meta, temperature, max_tokens):
+                yield chunk
+        elif cfg["provider"] == "aipro":
+            async for chunk in call_aipro(normalized, cfg["model"], meta, temperature, max_tokens):
+                yield chunk
+        elif cfg["provider"] == "custom_openai":
+            async for chunk in call_custom_openai(normalized, cfg, meta, temperature, max_tokens):
+                yield chunk
+        elif cfg["provider"] == "gemini_cli":
+            async for chunk in call_gemini_cli(normalized, cfg["model"], meta, temperature, max_tokens):
+                yield chunk
+        elif cfg["provider"] == "antigravity_cli":
+            async for chunk in call_antigravity_cli(normalized, cfg["model"], meta, temperature, max_tokens):
+                yield chunk
+        elif cfg["provider"] == "codex_cli":
+            async for chunk in call_codex_cli(normalized, cfg["model"], meta, temperature, max_tokens):
+                yield chunk
+        else:
+            yield f"[閿欒] 鏈煡 provider: {cfg.get('provider')}"
+
+    think_filter = ThinkTagReasoningFilter(meta)
+    async for chunk in _raw_chunks():
+        if cancel_event and cancel_event.is_set():
+            return
+        if isinstance(chunk, str) and chunk.startswith(CLI_STATUS_PREFIX):
             yield chunk
-    elif cfg["provider"] == "gemini":
-        async for chunk in call_gemini(normalized, cfg["model"], meta, temperature, max_tokens):
-            if cancel_event and cancel_event.is_set():
-                return
-            yield chunk
-    elif cfg["provider"] == "aipro":
-        async for chunk in call_aipro(normalized, cfg["model"], meta, temperature, max_tokens):
-            if cancel_event and cancel_event.is_set():
-                return
-            yield chunk
-    elif cfg["provider"] == "custom_openai":
-        async for chunk in call_custom_openai(normalized, cfg, meta, temperature, max_tokens):
-            if cancel_event and cancel_event.is_set():
-                return
-            yield chunk
-    elif cfg["provider"] == "gemini_cli":
-        async for chunk in call_gemini_cli(normalized, cfg["model"], meta, temperature, max_tokens):
-            if cancel_event and cancel_event.is_set():
-                return
-            yield chunk
-    elif cfg["provider"] == "antigravity_cli":
-        async for chunk in call_antigravity_cli(normalized, cfg["model"], meta, temperature, max_tokens):
-            if cancel_event and cancel_event.is_set():
-                return
-            yield chunk
-    elif cfg["provider"] == "codex_cli":
-        async for chunk in call_codex_cli(normalized, cfg["model"], meta, temperature, max_tokens):
-            if cancel_event and cancel_event.is_set():
-                return
-            yield chunk
+            continue
+        visible = think_filter.feed(chunk)
+        if visible:
+            yield visible
+
+    tail = think_filter.flush()
+    if tail and not (cancel_event and cancel_event.is_set()):
+        yield tail

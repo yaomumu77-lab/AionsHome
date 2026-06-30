@@ -11,8 +11,9 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from config import SETTINGS, MODELS, save_settings, get_key, get_sentinel_config, load_worldbook, save_worldbook, load_chat_status, TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES, THEATER_TTS_CACHE_DIR, normalize_custom_model_routes, refresh_custom_models
+from config import SETTINGS, save_settings, get_key, get_sentinel_config, load_worldbook, save_worldbook, load_chat_status, TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES, THEATER_TTS_CACHE_DIR, normalize_custom_model_routes, refresh_custom_models, iter_visible_models
 from tts import cleanup_tts_cache_dir
+from ws import manager
 
 router = APIRouter()
 
@@ -28,7 +29,7 @@ async def list_models():
             "custom": v.get("provider") == "custom_openai",
             "route_name": v.get("route_name", ""),
         }
-        for k, v in MODELS.items()
+        for k, v in iter_visible_models()
     ]
     return sorted(rows, key=lambda item: 1 if item["provider"] in RELAY_MODEL_PROVIDERS else 0)
 
@@ -266,6 +267,14 @@ class HealthShareToggle(BaseModel):
 async def update_health_share_setting(body: HealthShareToggle):
     SETTINGS["health_share_enabled"] = body.enabled
     save_settings(SETTINGS)
+    await manager.broadcast({
+        "type": "health_share_changed",
+        "data": {"health_share_enabled": body.enabled},
+    })
+    await manager.broadcast({
+        "type": "capability_config_changed",
+        "data": {"key": "health_context", "enabled": body.enabled},
+    })
     return {"ok": True, "health_share_enabled": body.enabled}
 
 # ── 世界书 ────────────────────────────────────────

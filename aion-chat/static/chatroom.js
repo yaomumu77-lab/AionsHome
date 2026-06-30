@@ -149,23 +149,59 @@ const crIsEmbedded = (() => {
   catch(e) { return false; }
 })();
 
+function crGetParentAudio(key) {
+  if (!crIsEmbedded) return null;
+  try {
+    const parentWin = window.parent;
+    if (!parentWin || parentWin === window || !parentWin.document?.body) return null;
+    const storeKey = `_cr_${key}Audio`;
+    if (!parentWin[storeKey]) {
+      const audio = parentWin.document.createElement('audio');
+      audio.style.display = 'none';
+      parentWin.document.body.appendChild(audio);
+      parentWin[storeKey] = audio;
+    }
+    return parentWin[storeKey];
+  } catch(e) {
+    return null;
+  }
+}
+
+function crCreateHiddenAudio() {
+  try {
+    const audio = document.createElement('audio');
+    audio.preload = 'auto';
+    audio.setAttribute('playsinline', '');
+    audio.style.display = 'none';
+    document.body.appendChild(audio);
+    return audio;
+  } catch(e) {
+    return new Audio();
+  }
+}
+
+function crReportAudioPlayFailure(label, err, audio) {
+  const mediaErr = audio?.error;
+  const detail = {
+    name: err?.name || '',
+    message: err?.message || '',
+    mediaCode: mediaErr?.code || 0,
+    mediaMessage: mediaErr?.message || '',
+    networkState: audio?.networkState,
+    readyState: audio?.readyState,
+    src: audio?.currentSrc || audio?.src || '',
+  };
+  console.warn(`[chatroom TTS] ${label} play failed`, detail);
+  const reason = detail.name || detail.mediaMessage || '浏览器没有开始播放';
+  try { toast(`语音播放失败：${reason}`); } catch(e) {}
+}
+
 // TTS 播放引擎：Audio 使用本地对象（可靠播放），离开页面时移交给 parent（尽力续播）
 const _ttsEngine = (function() {
   // 在 parent 上预建一个 handoff audio，用于离开页面后续播当前片段
-  let _handoffAudio = null;
-  try {
-    if (window.parent && window.parent !== window) {
-      if (!window.parent._crTtsHandoffAudio) {
-        const a = window.parent.document.createElement('audio');
-        a.style.display = 'none';
-        window.parent.document.body.appendChild(a);
-        window.parent._crTtsHandoffAudio = a;
-      }
-      _handoffAudio = window.parent._crTtsHandoffAudio;
-    }
-  } catch(e) {}
+  const _handoffAudio = crGetParentAudio('ttsHandoff');
 
-  const audio = new Audio(); // 本地 Audio，可靠播放
+  const audio = crCreateHiddenAudio();
   let _cbId = 0; // 回调去重 ID，防止 onended/onerror/catch 多次触发
   let _resumeTimer = null;
   let _stopRequested = false;
@@ -235,8 +271,9 @@ const _ttsEngine = (function() {
           if (myId !== _cbId || eng.audio.ended) return;
           scheduleResume();
         };
-        eng.audio.play().catch(() => {
+        eng.audio.play().catch((err) => {
           // 外部 App 抢占音频焦点时，play() 可能会短暂失败；保留当前分片，等待焦点恢复。
+          crReportAudioPlayFailure('live chunk', err, eng.audio);
           scheduleResume();
         });
         return;
@@ -293,7 +330,7 @@ const _ttsEngine = (function() {
 let crTtsAudio = _ttsEngine.audio;
 
 function crTtsPlaybackAllowed() {
-  return !crIsEmbedded;
+  return true;
 }
 
 function crCurrentTTSVoice() {
@@ -525,7 +562,6 @@ function crEnqueueTTSChunk(msgId, seq, url, createdAt, targetClientId) {
   const key = `${msgId}:${seq}`;
   if (crSeenTTSChunks.has(key)) return;
   crSeenTTSChunks.add(key);
-  if (crIsEmbedded) return;
   if (!crShouldAcceptTTSMsg(msgId, createdAt, targetClientId)) return;
   _ttsEngine.enqueue(msgId, seq, url);
 }
@@ -543,7 +579,6 @@ function crFinishTTSForMsg(msgId, createdAt, targetClientId) {
   }
   if (crSeenTTSDone.has(msgId)) return;
   crSeenTTSDone.add(msgId);
-  if (crIsEmbedded) return;
   _ttsEngine.finish(msgId);
 }
 
@@ -552,65 +587,81 @@ function crStopTTS() {
 }
 
 // ── TTS 重听 ──
-let crReplayAudio = new Audio();
+let crReplayAudio = crCreateHiddenAudio();
 let crReplayChunks = [];
 let crReplayIdx = 0;
+let crReplayToken = 0;
+let crReplayDiscoverPromise = null;
 
-async function crReplayTTS(msgId) {
-  const btn = document.querySelector(`[data-msg-id="${msgId}"] .tts-replay-btn`);
+async function crReplayTTS(msgId, triggerBtn = null) {
+  const btn = triggerBtn || document.querySelector(`[data-msg-id="${msgId}"] .tts-replay-btn`);
   // 正在播放则停止
   if (btn && btn.classList.contains('playing')) {
     crReplayAudio.pause(); crReplayAudio.src = ''; crReplayChunks = [];
     btn.classList.remove('playing');
+    crReplayToken++;
+    crReplayDiscoverPromise = null;
     crAmbientResumeAfterTts(500);
     return;
   }
   crReplayAudio.pause(); crReplayChunks = [];
   document.querySelectorAll('.tts-replay-btn.playing').forEach(b => b.classList.remove('playing'));
 
-  // 先尝试分段音频；允许中间偶发缺段，不让后续分段被挡住
-  let chunks = [];
-  let misses = 0;
-  for (let i = 0; i < 120; i++) {
-    const resp = await fetch(`/api/tts/audio/${msgId}_s${i}`, { method: 'HEAD' });
-    if (resp.ok) {
-      chunks.push(`/api/tts/audio/${msgId}_s${i}`);
-      misses = 0;
-    } else if (chunks.length > 0 && ++misses >= 8) {
-      break;
-    } else if (chunks.length === 0 && i >= 8) {
-      break;
-    }
-  }
-
-  // 降级：单文件
-  if (chunks.length === 0) {
-    const resp = await fetch(`/api/tts/audio/${msgId}`);
-    if (!resp.ok) return;
-    const blob = await resp.blob();
-    const url = URL.createObjectURL(blob);
-    crReplayAudio.src = url;
-    if (btn) btn.classList.add('playing');
-    crAmbientPauseForTts();
-    crReplayAudio.onended = () => { URL.revokeObjectURL(url); if (btn) btn.classList.remove('playing'); crAmbientResumeAfterTts(); };
-    crReplayAudio.onerror = () => { URL.revokeObjectURL(url); if (btn) btn.classList.remove('playing'); crAmbientResumeAfterTts(); };
-    await crReplayAudio.play().catch(() => { if (btn) btn.classList.remove('playing'); crAmbientResumeAfterTts(500); });
-    return;
-  }
-
-  // 顺序播放分段
-  crReplayChunks = chunks; crReplayIdx = 0;
+  const token = ++crReplayToken;
+  crReplayChunks = [`/api/tts/audio/${msgId}_s0`];
+  crReplayIdx = 0;
   if (btn) btn.classList.add('playing');
   crAmbientPauseForTts();
-  _crPlayReplayChunk(btn);
+
+  // 先在用户点击同步链路里立刻播放 s0，避免多次 HEAD 后丢失浏览器播放许可。
+  _crPlayReplayChunk(btn, token);
+
+  crReplayDiscoverPromise = crDiscoverReplayChunks(msgId).then(chunks => {
+    if (token === crReplayToken && chunks.length) crReplayChunks = chunks;
+    return chunks;
+  });
 }
 
-function _crPlayReplayChunk(btn) {
-  if (crReplayIdx >= crReplayChunks.length) { if (btn) btn.classList.remove('playing'); crAmbientResumeAfterTts(); return; }
+async function crDiscoverReplayChunks(msgId) {
+  const chunks = [];
+  for (let i = 0; i < 120; i++) {
+    const resp = await fetch(`/api/tts/audio/${msgId}_s${i}`, { method: 'HEAD' });
+    if (!resp.ok) break;
+    chunks.push(`/api/tts/audio/${msgId}_s${i}`);
+  }
+  return chunks;
+}
+
+function crFinishReplay(btn) {
+  if (btn) btn.classList.remove('playing');
+  crReplayDiscoverPromise = null;
+  crAmbientResumeAfterTts();
+}
+
+function _crPlayReplayChunk(btn, token = crReplayToken) {
+  if (token !== crReplayToken) return;
+  if (crReplayIdx >= crReplayChunks.length) {
+    if (crReplayDiscoverPromise) {
+      const pending = crReplayDiscoverPromise;
+      crReplayDiscoverPromise = null;
+      pending.then(() => {
+        if (token !== crReplayToken) return;
+        if (crReplayIdx < crReplayChunks.length) _crPlayReplayChunk(btn, token);
+        else crFinishReplay(btn);
+      }).catch(() => crFinishReplay(btn));
+      return;
+    }
+    crFinishReplay(btn);
+    return;
+  }
   crReplayAudio.src = crReplayChunks[crReplayIdx];
-  crReplayAudio.onended = () => { crReplayIdx++; _crPlayReplayChunk(btn); };
-  crReplayAudio.onerror = () => { crReplayIdx++; _crPlayReplayChunk(btn); };
-  crReplayAudio.play().catch(() => { if (btn) btn.classList.remove('playing'); crAmbientResumeAfterTts(500); });
+  crReplayAudio.onended = () => { crReplayIdx++; _crPlayReplayChunk(btn, token); };
+  crReplayAudio.onerror = () => { crReplayIdx++; _crPlayReplayChunk(btn, token); };
+  crReplayAudio.play().catch((err) => {
+    crReportAudioPlayFailure('replay chunk', err, crReplayAudio);
+    if (btn) btn.classList.remove('playing');
+    crAmbientResumeAfterTts(500);
+  });
 }
 
 function onTtsToggleChange() {
@@ -1578,6 +1629,63 @@ function crBuildTokenDetailHtml(u) {
   return html;
 }
 
+function crFormatSystemLogForCopy(d) {
+  const lines = [];
+  lines.push(`[${d._ts || ''}] ${d.model || (d.log_kind === 'ambient_voice' ? 'ambient-sentinel' : '?')}`);
+  if (d.has_error && d.error_text) lines.push(`错误: ${d.error_text}`);
+  if (d.log_kind === 'ambient_voice') {
+    if (d.ambient_source) lines.push(`音源: ${d.ambient_source}`);
+    if (d.ambient_topic) lines.push(`话题: ${d.ambient_topic}`);
+    if (d.ambient_reason) lines.push(`原因: ${d.ambient_reason}`);
+    if (d.ambient_summary) lines.push(`去噪摘要:\n${d.ambient_summary}`);
+  }
+  if (d.recall_topic) lines.push(`话题: ${d.recall_topic}`);
+  if (d.recall_keywords) lines.push(`关键词: ${d.recall_keywords}`);
+  if (d.recall_query) lines.push(`向量匹配查询:\n${d.recall_query}`);
+  if (Array.isArray(d.debug_top6) && d.debug_top6.length) {
+    lines.push('记忆库 Top6:');
+    d.debug_top6.forEach((m, i) => {
+      lines.push(`${i + 1}. score=${m.score} vec=${m.vec_sim} kw=${m.kw_score} imp=${m.importance}\n${m.content || ''}`);
+    });
+  }
+  if (Array.isArray(d.recalled_memories) && d.recalled_memories.length) {
+    lines.push('实际召回记忆:');
+    d.recalled_memories.forEach((m, i) => {
+      lines.push(`${i + 1}. score=${m.score} type=${m.type || ''}\n${m.content || ''}`);
+    });
+  }
+  if (Array.isArray(d.prompt_messages) && d.prompt_messages.length) {
+    lines.push('完整 Prompt:');
+    d.prompt_messages.forEach((m, i) => {
+      lines.push(`--- ${i + 1}. ${m.role || ''} ---\n${m.content || ''}`);
+    });
+  }
+  return lines.join('\n\n');
+}
+
+async function crCopySystemLogEntry(id) {
+  const item = crSystemLogs.find(log => log._id === id);
+  if (!item) return;
+  try {
+    await navigator.clipboard.writeText(crFormatSystemLogForCopy(item));
+    toast('已复制本条系统日志全文');
+  } catch (e) {
+    console.error('复制聊天室系统日志失败:', e);
+    toast('复制失败');
+  }
+}
+
+async function crCopyAllSystemLogs() {
+  if (!crSystemLogs.length) return;
+  try {
+    await navigator.clipboard.writeText(crSystemLogs.map(crFormatSystemLogForCopy).join('\n\n==============================\n\n'));
+    toast('已复制全部系统日志');
+  } catch (e) {
+    console.error('复制全部聊天室系统日志失败:', e);
+    toast('复制失败');
+  }
+}
+
 function crAmbientSkipLabel(reason) {
   return ({
     sentinel_rejected: '哨兵未放行',
@@ -1618,6 +1726,7 @@ function crBuildAmbientLogEntry(d, detailId) {
     <span class="ambient-log-status ${statusCls}">${esc(status)}</span>
     <span class="cr-syslog-tokens">${esc(reason)}${topic}</span>
     ${detailHtml ? `<button class="cr-syslog-detail-toggle" onclick="crToggleSysLogDetail('${detailId}')">详情 ▾</button>` : ''}
+    ${detailHtml ? `<button class="cr-syslog-detail-toggle" onclick="crCopySystemLogEntry('${d._id}')">复制全文</button>` : ''}
     ${detailHtml ? `<div class="cr-syslog-detail" id="${detailId}">${detailHtml}</div>` : ''}
   </div>`;
 }
@@ -1693,6 +1802,7 @@ function crRenderSystemLogList() {
       <span class="cr-syslog-tokens">${tokenText}</span>
       <span class="${memCls}">${memText}</span>
       ${hasDetail ? `<button class="cr-syslog-detail-toggle" onclick="crToggleSysLogDetail('${detailId}')">详情 ▾</button>` : ''}
+      ${hasDetail ? `<button class="cr-syslog-detail-toggle" onclick="crCopySystemLogEntry('${d._id}')">复制全文</button>` : ''}
       ${hasDetail ? `<div class="cr-syslog-detail" id="${detailId}">${detailHtml}</div>` : ''}
     </div>`;
   }).join('');
@@ -2230,11 +2340,17 @@ function crMsgFeedbackHtml(msg) {
   </span>`;
 }
 
-function crMsgSenderLineHtml(sender, name, msgId, msg = null) {
+function crMsgSenderLineHtml(sender, name, msgId, msg = null, opts = {}) {
   const menuHtml = crMsgMenuHtml(sender, msgId);
   const feedbackHtml = crMsgFeedbackHtml(msg || { id: msgId, sender });
+  const ttsHtml = opts.tts && sender !== 'user' && msgId
+    ? `<button class="tts-replay-btn" onclick="crReplayTTS('${msgId}', this)" title="重听语音">🔊</button>`
+    : '';
+  const memoryHtml = opts.memory && msgId
+    ? `<button class="memory-record-hint" onclick="event.stopPropagation();crShowMemoryRecordCard('${msgId}')" title="已记录到记忆库">💡</button>`
+    : '';
   if (sender !== 'user') {
-    return `<div class="sender-line"><span class="sender-label ${sender}">${esc(name)}</span>${menuHtml}${feedbackHtml}</div>`;
+    return `<div class="sender-line"><span class="sender-label ${sender}">${esc(name)}</span>${menuHtml}${feedbackHtml}${ttsHtml}${memoryHtml}</div>`;
   }
   return menuHtml ? `<div class="sender-line user-line">${menuHtml}</div>` : '';
 }
@@ -2242,11 +2358,25 @@ function crMsgSenderLineHtml(sender, name, msgId, msg = null) {
 function crEnsureMsgMenu(row, sender, msgId) {
   if (!row || !msgId) return;
   const content = row.querySelector('.msg-content');
-  if (!content || content.querySelector('.msg-menu-wrap')) return;
+  if (!content) return;
+  const senderLines = Array.from(content.querySelectorAll('.sender-line'));
+  if (senderLines.length) {
+    const line = senderLines[0];
+    if (sender !== 'user' && !line.querySelector('.tts-replay-btn')) {
+      line.insertAdjacentHTML('beforeend', `<button class="tts-replay-btn" onclick="crReplayTTS('${msgId}', this)" title="重听语音">🔊</button>`);
+    }
+    if (crMemoryRecordMsgIds.has(msgId) && !line.querySelector('.memory-record-hint')) {
+      line.insertAdjacentHTML('beforeend', `<button class="memory-record-hint" onclick="event.stopPropagation();crShowMemoryRecordCard('${msgId}')" title="已记录到记忆库">💡</button>`);
+    }
+    return;
+  }
   const name = crName(sender);
-  const senderLine = crMsgSenderLineHtml(sender, name, msgId, { id: msgId, sender });
+  const senderLine = crMsgSenderLineHtml(sender, name, msgId, { id: msgId, sender }, {
+    tts: sender !== 'user',
+    memory: crMemoryRecordMsgIds.has(msgId),
+  });
   if (!senderLine) return;
-  const directLabel = Array.from(content.children).find(el => el.classList?.contains('sender-label'));
+  const directLabel = Array.from(content.querySelectorAll('.sender-label')).find(Boolean);
   if (directLabel) {
     directLabel.insertAdjacentHTML('beforebegin', senderLine);
     directLabel.remove();
@@ -2267,6 +2397,77 @@ function crBubbleParts(raw, isUser = false) {
   if (singleLineParts.length < 2) return singleLineParts;
   if (singleLineParts.some(p => CR_STRUCTURED_LINE_RE.test(p))) return splitText.split(/\n{2,}/).filter(p => p.trim());
   return singleLineParts;
+}
+
+function crMessageContentItems(raw, isUser = false) {
+  const items = [];
+  const monologueRe = /\[心里嘀咕[：:]\s*([^\]]+?)\]/g;
+  for (const part of crBubbleParts(raw, isUser)) {
+    let last = 0;
+    let match;
+    monologueRe.lastIndex = 0;
+    while ((match = monologueRe.exec(part)) !== null) {
+      const before = part.slice(last, match.index).trim();
+      if (before) items.push({ type: 'bubble', text: before });
+      const thought = (match[1] || '').trim();
+      if (thought) items.push({ type: 'monologue', text: thought });
+      last = monologueRe.lastIndex;
+    }
+    const tail = part.slice(last).trim();
+    if (tail) items.push({ type: 'bubble', text: tail });
+  }
+  return items;
+}
+
+function crBubbleUnitHtml({ sender, name, avatar, msgId, msg, html, showHeader, includeActions, preBubbleHtml = '' }) {
+  const senderLine = showHeader
+    ? crMsgSenderLineHtml(sender, name, msgId, msg, {
+        tts: includeActions,
+        memory: includeActions && crMemoryRecordMsgIds.has(msgId),
+      })
+    : '';
+  const emptyClass = String(html || '').trim() ? '' : ' empty-message';
+  return `<div class="message-unit ${sender}${emptyClass}">
+    <div class="msg-avatar-col"><img class="avatar" src="${avatar}" alt="${esc(name)}"></div>
+    <div class="unit-content">
+      ${senderLine}
+      ${preBubbleHtml}
+      <div class="bubble">${html}</div>
+    </div>
+  </div>`;
+}
+
+function crRenderMessageItems(items, { sender, name, avatar, msgId, msg, fmt, isUser }) {
+  let firstBubble = true;
+  let leadingMonologues = [];
+  const htmlParts = [];
+  items.forEach(item => {
+    if (item.type === 'monologue') {
+      if (firstBubble) {
+        leadingMonologues.push(item.text);
+      } else {
+        htmlParts.push(`<div class="inner-monologue-line">${esc(item.text)}</div>`);
+      }
+      return;
+    }
+    const showHeader = firstBubble;
+    const preBubbleHtml = showHeader && leadingMonologues.length
+      ? leadingMonologues.map(text => `<div class="inner-monologue-line">${esc(text)}</div>`).join('')
+      : '';
+    firstBubble = false;
+    leadingMonologues = [];
+    htmlParts.push(crBubbleUnitHtml({
+      sender, name, avatar, msgId, msg,
+      html: fmt(item.text),
+      showHeader,
+      includeActions: !isUser && showHeader,
+      preBubbleHtml,
+    }));
+  });
+  if (leadingMonologues.length) {
+    htmlParts.push(...leadingMonologues.map(text => `<div class="inner-monologue-line">${esc(text)}</div>`));
+  }
+  return htmlParts.join('');
 }
 
 function msgHTML(m) {
@@ -2297,17 +2498,21 @@ function msgHTML(m) {
   const hasVoiceAtt = messageAttachments.some(a => typeof a === 'object' && a.type === 'voice');
   const isVoiceOnly = hasVoiceAtt && (!raw || messageAttachments.some(a => typeof a === 'object' && a.type === 'voice' && a.transcript === raw));
   const hasWishFulfillmentAtt = messageAttachments.some(a => typeof a === 'object' && a.type === 'wish_fulfillment');
+  const hasDateSummaryAtt = messageAttachments.some(a => typeof a === 'object' && a.type === 'date_summary');
 
   // AI 消息使用 escWithImages 解析 [[image:...]] 和转账卡片，用户消息也渲染转账卡片
   const fmt = isUser ? escWithTransfer : escWithImages;
   let bubblesHtml = '';
-  if (!isVoiceOnly && (!hasWishFulfillmentAtt || !isUser)) {
-    const parts = crBubbleParts(raw, isUser);
-    if (parts.length > 1) {
-      bubblesHtml = '<div class="bubbles">' + parts.map(p => `<div class="bubble">${fmt(p)}</div>`).join('') + '</div>';
-    } else if (raw.trim()) {
-      bubblesHtml = `<div class="bubble">${fmt(raw)}</div>`;
-    }
+  if (!isVoiceOnly && !hasDateSummaryAtt && (!hasWishFulfillmentAtt || !isUser)) {
+    const items = crMessageContentItems(raw, isUser);
+    bubblesHtml = items.length
+      ? `<div class="message-stack">${crRenderMessageItems(items, { sender, name, avatar, msgId: m.id || '', msg: m, fmt, isUser })}</div>`
+      : `<div class="message-stack">${crBubbleUnitHtml({
+          sender, name, avatar, msgId: m.id || '', msg: m,
+          html: '',
+          showHeader: true,
+          includeActions: true,
+        })}</div>`;
   }
 
   // 渲染附件图片
@@ -2315,35 +2520,15 @@ function msgHTML(m) {
   const attHtml = renderAttachments(messageAttachments);
 
   const msgId = m.id || '';
-  const actionHtml = isUser
-    ? `<button onclick="editChatroomMsg('${msgId}');closeMsgMenus()">编辑</button>`
-    : `<button onclick="regenerateChatroomMsg('${msgId}');closeMsgMenus()">重新生成</button>`;
-  const menuHtml = msgId ? `
-    <div class="msg-menu-wrap">
-      <button class="msg-menu-btn" onclick="toggleMsgMenu(event)">⋯</button>
-      <div class="msg-menu-dropdown">
-        ${actionHtml}
-        <button class="danger" onclick="deleteMsg('${msgId}', this)">删除</button>
-      </div>
-    </div>` : '';
-
-  const senderLine = crMsgSenderLineHtml(sender, name, msgId, m);
-
-  const ttsBtn = !isUser && msgId ? `<button class="tts-replay-btn" onclick="crReplayTTS('${msgId}')" title="重听语音">🔊</button>` : '';
 
   return `
     <div class="message-row ${sender}" data-msg-id="${msgId}">
       <div class="msg-body">
-        <div class="msg-avatar-col">
-          <img class="avatar" src="${avatar}" alt="${name}">
-          ${ttsBtn}
-        </div>
         <div class="msg-content">
-          ${senderLine}
-          ${hasWishFulfillmentAtt ? attHtml : ''}
+          ${hasWishFulfillmentAtt || hasDateSummaryAtt ? attHtml : ''}
           ${bubblesHtml}
           ${toyHtml}
-          ${hasWishFulfillmentAtt ? '' : attHtml}
+          ${hasWishFulfillmentAtt || hasDateSummaryAtt ? '' : attHtml}
         </div>
       </div>
       <div class="message-meta">${time}</div>
@@ -2743,6 +2928,7 @@ function startStreamingBubble(sender, id) {
   streamingText = '';
   const name = crName(sender);
   const avatar = AVATARS[sender] || AVATARS.user;
+  const senderLine = crMsgSenderLineHtml(sender, name, id, { id, sender }, { tts: false });
 
   // 移除 typing
   const typing = messagesEl.querySelector('.typing-indicator');
@@ -2753,12 +2939,16 @@ function startStreamingBubble(sender, id) {
   row.id = `streaming-${id}`;
   row.innerHTML = `
     <div class="msg-body">
-      <div class="msg-avatar-col">
-        <img class="avatar" src="${avatar}" alt="${name}">
-      </div>
       <div class="msg-content">
-        <div class="sender-label ${sender}">${esc(name)}</div>
-        <div class="bubble"></div>
+        <div class="message-stack">
+          <div class="message-unit ${sender}">
+            <div class="msg-avatar-col"><img class="avatar" src="${avatar}" alt="${esc(name)}"></div>
+            <div class="unit-content">
+              ${senderLine}
+              <div class="bubble"></div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
     <div class="message-meta">${timeStr(Date.now() / 1000)}</div>`;
@@ -2798,27 +2988,21 @@ function endStreamingBubble(messageOrAttachments) {
 
   // 流结束后，按段落拆分成多个气泡，并解析 [[image:...]] 和转账卡片
   if (streamingBubble && streamingText) {
-    const parts = crBubbleParts(streamingText, false);
-    if (parts.length > 1) {
-      const parent = streamingBubble.parentElement;
-      const container = document.createElement('div');
-      container.className = 'bubbles';
-      parts.forEach(p => {
-        const b = document.createElement('div');
-        b.className = 'bubble';
-        b.innerHTML = escWithImages(p);
-        container.appendChild(b);
+    const sender = streamRow?.classList.contains('connor') ? 'connor' : (streamRow?.classList.contains('aion') ? 'aion' : 'user');
+    const name = crName(sender);
+    const avatar = AVATARS[sender] || AVATARS.user;
+    const msgId = streamRow?.id?.startsWith('streaming-') ? streamRow.id.replace('streaming-', '') : '';
+    const stack = streamingBubble.closest('.message-stack') || streamingBubble.closest('.msg-content');
+    const items = crMessageContentItems(streamingText, sender === 'user');
+    if (stack) {
+      stack.innerHTML = crRenderMessageItems(items, {
+        sender, name, avatar, msgId,
+        msg: { id: msgId, sender },
+        fmt: sender === 'user' ? escWithTransfer : escWithImages,
+        isUser: sender === 'user',
       });
-      parent.replaceChild(container, streamingBubble);
-      // 附件图片追加到多气泡容器后面
       const attHtml = renderAttachments(attachments);
-      if (attHtml) container.insertAdjacentHTML('afterend', attHtml);
-    } else {
-      // 单气泡也解析 [[image:...]]
-      streamingBubble.innerHTML = escWithImages(streamingText);
-      // 附件图片追加到气泡后面
-      const attHtml = renderAttachments(attachments);
-      if (attHtml) streamingBubble.insertAdjacentHTML('afterend', attHtml);
+      if (attHtml) stack.insertAdjacentHTML('afterend', attHtml);
     }
   }
   // 为流式气泡添加 TTS 重听按钮 + data-msg-id
@@ -2827,10 +3011,6 @@ function endStreamingBubble(messageOrAttachments) {
     streamRow.setAttribute('data-msg-id', msgId);
     const sender = streamRow.classList.contains('connor') ? 'connor' : (streamRow.classList.contains('aion') ? 'aion' : 'user');
     crEnsureMsgMenu(streamRow, sender, msgId);
-    const avatarCol = streamRow.querySelector('.msg-avatar-col');
-    if (avatarCol && !avatarCol.querySelector('.tts-replay-btn')) {
-      avatarCol.insertAdjacentHTML('beforeend', `<button class="tts-replay-btn" onclick="crReplayTTS('${msgId}')" title="重听语音">🔊</button>`);
-    }
     if (crMemoryRecordMsgIds.has(msgId)) crApplyMemoryHint(msgId);
     crShowToyCapsule(msgId, crToyCommandsFromAttachments(attachments));
   }
@@ -2856,9 +3036,10 @@ function crShowMemoryRecordHint(msgId, content) {
 function crApplyMemoryHint(msgId) {
   const row = document.getElementById(`streaming-${msgId}`) || document.querySelector(`[data-msg-id="${msgId}"]`);
   if (!row) return;
-  const avatarCol = row.querySelector('.msg-avatar-col');
-  if (!avatarCol || avatarCol.querySelector('.memory-record-hint')) return;
-  const hint = document.createElement('span');
+  const line = row.querySelector('.sender-line');
+  if (!line || line.querySelector('.memory-record-hint')) return;
+  const hint = document.createElement('button');
+  hint.type = 'button';
   hint.className = 'memory-record-hint';
   hint.textContent = '💡';
   hint.title = '已记录到记忆库';
@@ -2866,7 +3047,7 @@ function crApplyMemoryHint(msgId) {
     e.stopPropagation();
     crShowMemoryRecordCard(msgId);
   };
-  avatarCol.appendChild(hint);
+  line.appendChild(hint);
 }
 
 function crShowMemoryRecordCard(msgId) {
@@ -4990,6 +5171,16 @@ function crBuildGeneratedSongCard(item) {
   </div>`;
 }
 
+function buildDateSummaryCard(item) {
+  const title = esc(item.title || '约会');
+  const summary = esc(item.summary || '');
+  return `<div class="date-summary-card">
+    <div class="date-summary-kicker">刚刚完成了约会</div>
+    <div class="date-summary-title">${title}</div>
+    ${summary ? `<div class="date-summary-text">${summary}</div>` : ''}
+  </div>`;
+}
+
 function renderAttachments(atts) {
   if (!atts || !atts.length) return '';
   let html = '';
@@ -5000,6 +5191,8 @@ function renderAttachments(atts) {
     const type = (typeof item === 'object' && item.type) || '';
     if (type === 'luckin_payment') {
       html += buildLuckinPaymentCard(item);
+    } else if (type === 'date_summary') {
+      html += buildDateSummaryCard(item);
     } else if (type === 'wish_fulfillment') {
       wishHtml += crBuildWishFulfillmentCard(item);
     } else if (type === 'music') {
@@ -5117,6 +5310,23 @@ function esc(str) {
   return div.innerHTML;
 }
 
+function crRenderInnerMonologues(html) {
+  return String(html || '').replace(/\[心里嘀咕[：:]\s*([^\]]+?)\]/g, (_, content) =>
+    `<span class="inner-monologue">${content.trim()}</span>`
+  );
+}
+
+function crInnerMonologueText(s) {
+  const match = String(s || '').match(/^\s*\[心里嘀咕[：:]\s*([^\]]+?)\]\s*$/);
+  return match ? match[1].trim() : null;
+}
+
+function crRenderMessagePart(p, fmt) {
+  const monologue = crInnerMonologueText(p);
+  if (monologue !== null) return `<div class="inner-monologue-line">${esc(monologue)}</div>`;
+  return `<div class="bubble">${fmt(p)}</div>`;
+}
+
 /** 渲染 [转账给XXX：N元] 或 [转账：N元] 为微信风格转账卡片 */
 function renderTransferCards(html) {
   const transferRe = /\[\u8f6c\u8d26(?:\u7ed9([^\uff1a:]+?))?[\uff1a:]\s*(-?\d+(?:\.\d+)?)\s*\u5143\]/g;
@@ -5137,7 +5347,7 @@ function renderTransferCards(html) {
 /** 转义文本并渲染转账卡片（用户消息） */
 function escWithTransfer(str) {
   if (!str) return '';
-  return renderTransferCards(esc(str));
+  return crRenderInnerMonologues(renderTransferCards(esc(str)));
 }
 
 /** 将文本中的 [[image:...]] 标记渲染为 <img>，[转账：N元] 渲染为卡片，其余部分转义 */
@@ -5159,7 +5369,7 @@ function escWithImages(str) {
   }
   const tail = str.slice(lastIdx);
   if (tail) result += esc(tail);
-  return renderTransferCards(result);
+  return crRenderInnerMonologues(renderTransferCards(result));
 }
 
 // ══════════════════════════════════════════════════

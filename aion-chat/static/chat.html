@@ -5,11 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Aion Chat</title>
 <link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/public/icon-192.png" type="image/png">
 <link rel="apple-touch-icon" href="/public/icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#ff8359">
-<link rel="stylesheet" href="/static/chat.css?v=song-player-20260615c">
+<link rel="stylesheet" href="/static/chat.css?v=date-summary-card-20260628">
 </head>
 <body data-theme="dark">
 
@@ -121,6 +122,7 @@
         <div class="syslog-empty">暂无日志</div>
       </div>
       <div class="btn-row">
+        <button class="btn-cancel" onclick="copyAllSystemLogs()">复制全部</button>
         <button class="btn-cancel" onclick="clearSystemLog()">清空</button>
         <button class="btn-cancel" onclick="closeSystemLog()">关闭</button>
       </div>
@@ -285,15 +287,15 @@
   </div>
 
   <div id="subPageFrames">
-    <iframe id="subPageFrame" class="sub-page-frame" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"></iframe>
+    <iframe id="subPageFrame" class="sub-page-frame" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals" allow="autoplay"></iframe>
   </div>
 </div>
-<script src="/static/chat.js?v=ring-keepalive-20260623"></script>
+<script src="/static/chat.js?v=date-summary-card-20260628"></script>
 
 <!-- ── 转账弹窗 ── -->
 <div class="transfer-dialog-overlay" id="transferDialogOverlay" onclick="closeTransferDialog()">
   <div class="transfer-dialog" onclick="event.stopPropagation()">
-    <div class="transfer-dialog-title" id="transferDialogTitle">给【AI】转账</div>
+    <div class="transfer-dialog-title" id="transferDialogTitle">转账</div>
     <input type="number" id="transferAmountInput" class="transfer-amount-input" placeholder="输入金额" step="1">
     <div class="transfer-dialog-hint">正数=转账，负数=扣除</div>
     <div class="transfer-dialog-btns">

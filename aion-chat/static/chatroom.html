@@ -5,11 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>聊天室</title>
 <link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/public/icon-192.png" type="image/png">
 <link rel="apple-touch-icon" href="/public/icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#050923">
-<link rel="stylesheet" href="/static/chatroom.css?v=song-player-20260615c">
+<link rel="stylesheet" href="/static/chatroom.css?v=date-summary-card-20260628">
 </head>
 <body>
   <div class="app">
@@ -388,6 +389,7 @@
         <div class="cr-syslog-empty">暂无日志</div>
       </div>
       <div class="cr-syslog-actions">
+        <button class="transfer-btn-cancel" onclick="crCopyAllSystemLogs()">复制全部</button>
         <button class="transfer-btn-cancel" onclick="crClearSystemLog()">清空</button>
         <button class="transfer-btn-cancel" onclick="crCloseSystemLog()">关闭</button>
       </div>
@@ -430,6 +432,6 @@
     </div>
   </div>
 
-  <script src="/static/chatroom.js?v=digest-model-20260624"></script>
+  <script src="/static/chatroom.js?v=date-summary-card-20260628"></script>
 </body>
 </html>

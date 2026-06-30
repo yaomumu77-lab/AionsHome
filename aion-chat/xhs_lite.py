@@ -24,7 +24,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "logged_in_nickname": "",
     "logged_in_red_id": "",
     "last_login_check_at": 0,
-    "use_following_list": True,
+    "use_following_list": False,
     "max_following_pages": 3,
     "allow_write_comments": False,
     "write_delay_seconds": 5,
@@ -314,23 +314,6 @@ async def _resolve_target(cfg: dict, cookie: str) -> dict:
     if not target_name:
         raise RuntimeError("请先填写目标账号 user_id（你的账号）")
 
-    login = await _run_worker("check-login", {}, cookie=cookie, timeout=60)
-    login_user_id = str(login.get("user_id") or "").strip()
-    follow_error = ""
-    if cfg.get("use_following_list", True):
-        try:
-            users = await _list_followings_all(cookie, cfg, login_user_id)
-            matched = _match_user(users, target_name)
-            if matched:
-                return {
-                    "user_id": matched.get("user_id") or "",
-                    "nickname": matched.get("nickname") or target_name,
-                    "xsec_token": matched.get("xsec_token") or "",
-                    "source": "following_list",
-                }
-        except Exception as exc:
-            follow_error = str(exc)
-
     search = await _run_worker("search", {"keyword": target_name, "page": 1}, cookie=cookie, timeout=90)
     for note in _extract_notes(search):
         if note.get("author_id"):
@@ -340,8 +323,7 @@ async def _resolve_target(cfg: dict, cookie: str) -> dict:
                 "xsec_token": note.get("xsec_token") or "",
                 "source": "search_fallback",
             }
-    suffix = f"；关注列表失败：{follow_error}" if follow_error else ""
-    raise RuntimeError(f"没有在关注列表或搜索结果里找到目标账号：{target_name}{suffix}")
+    raise RuntimeError(f"没有在搜索结果里找到目标账号：{target_name}")
 
 
 def _ensure_signature(text: str, actor_name: str, template: str) -> str:

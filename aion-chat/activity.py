@@ -933,6 +933,8 @@ def generate_activity_summary(hours: int = KEEP_HOURS) -> list[dict]:
     # 过滤系统应用（不做 resolve，保留原始 app 名给 _beautify_app 用）
     filtered = []
     for e in entries:
+        if e.get("device") == "home" and e.get("kind") == "home_sensor":
+            continue
         app = e.get("app", "")
         if "." in app and app in KNOWN_APPS and KNOWN_APPS[app] is None:
             continue

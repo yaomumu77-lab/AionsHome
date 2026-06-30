@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>工具与能力</title>
+<link rel="stylesheet" href="/static/common.css">
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#ff8359">
+<style>
+.capabilities-page {
+  max-width: 920px;
+}
+.cap-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px 0 16px;
+}
+.cap-summary {
+  flex: 1;
+  min-width: 180px;
+  color: var(--text2);
+  font-size: 13px;
+}
+.cap-action {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  color: var(--text);
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.cap-action:hover {
+  border-color: var(--accent);
+}
+.cap-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-bottom: 40px;
+}
+.cap-group {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.cap-group-title {
+  margin: 0 0 10px;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 700;
+}
+.cap-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.cap-row {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: start;
+}
+.cap-main {
+  min-width: 0;
+}
+.cap-name-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cap-name {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+.cap-status {
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 11px;
+  line-height: 1.5;
+  background: var(--surface2);
+  color: var(--text2);
+}
+.cap-status.on {
+  color: #fff;
+  background: var(--accent);
+}
+.cap-status.wait {
+  color: #8a5a00;
+  background: #fff0bf;
+}
+.cap-desc {
+  margin-top: 6px;
+  color: var(--text2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.cap-note {
+  margin-top: 4px;
+  color: var(--text3);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.cap-empty {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--text3);
+  font-size: 14px;
+}
+@media (max-width: 760px) {
+  .cap-list {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
+</head>
+<body>
+<div class="sub-page capabilities-page">
+  <div class="top-bar">
+    <button class="back-btn" onclick="navigateSubPageBack()">⬅</button>
+    <h2>工具与能力</h2>
+  </div>
+  <div class="page-content">
+    <div class="cap-toolbar">
+      <div class="cap-summary" id="capSummary">加载中...</div>
+      <button class="cap-action" onclick="setAllCapabilities(true)">全部勾选</button>
+      <button class="cap-action" onclick="setAllCapabilities(false)">全部取消</button>
+      <button class="cap-action" onclick="loadCapabilities()">刷新</button>
+    </div>
+    <div class="cap-groups" id="capGroups">
+      <div class="cap-empty">加载中...</div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/theme.js?v=theme-20260606"></script>
+<script src="/static/common.js"></script>
+<script>
+let capabilityPayload = null;
+let capabilityBusy = false;
+
+function statusFor(item) {
+  if (!item.enabled) return { text: '未注入', cls: '' };
+  if (!item.available) return { text: '条件不足', cls: 'wait' };
+  return { text: '会注入', cls: 'on' };
+}
+
+function renderCapabilities() {
+  const groupsEl = $('capGroups');
+  const summaryEl = $('capSummary');
+  if (!capabilityPayload || !Array.isArray(capabilityPayload.groups)) {
+    groupsEl.innerHTML = '<div class="cap-empty">没有可显示的能力</div>';
+    summaryEl.textContent = '0 项';
+    return;
+  }
+  const summary = capabilityPayload.summary || {};
+  summaryEl.textContent = `${summary.enabled || 0}/${summary.total || 0} 已勾选，${summary.injected_now || 0} 项当前满足注入条件`;
+
+  groupsEl.innerHTML = capabilityPayload.groups.map(group => `
+    <section class="cap-group">
+      <h3 class="cap-group-title">${escHtml(group.name)}</h3>
+      <div class="cap-list">
+        ${(group.items || []).map(item => {
+          const status = statusFor(item);
+          const noteParts = [item.runtime_note, item.unavailable_reason].filter(Boolean);
+          return `
+            <div class="cap-row" data-key="${escHtml(item.key)}">
+              <div class="cap-main">
+                <div class="cap-name-line">
+                  <div class="cap-name">${escHtml(item.name)}</div>
+                  <span class="cap-status ${status.cls}">${status.text}</span>
+                </div>
+                <div class="cap-desc">${escHtml(item.description)}</div>
+                ${noteParts.length ? `<div class="cap-note">${escHtml(noteParts.join('；'))}</div>` : ''}
+              </div>
+              <label class="toggle-switch" title="${escHtml(item.name)}">
+                <input type="checkbox" ${item.enabled ? 'checked' : ''} onchange="toggleCapability('${escHtml(item.key)}', this.checked, this)" ${capabilityBusy ? 'disabled' : ''}>
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </section>
+  `).join('');
+}
+
+async function loadCapabilities() {
+  try {
+    const res = await fetch('/api/capabilities', { cache: 'no-store' });
+    capabilityPayload = await res.json();
+    renderCapabilities();
+  } catch (err) {
+    $('capGroups').innerHTML = '<div class="cap-empty">加载失败</div>';
+    showToast('加载失败');
+  }
+}
+
+async function toggleCapability(key, enabled, input) {
+  if (input) input.disabled = true;
+  try {
+    const res = await fetch(`/api/capabilities/${encodeURIComponent(key)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.detail || 'update failed');
+    capabilityPayload = data.payload;
+    renderCapabilities();
+    showToast(enabled ? '已勾选' : '已取消');
+  } catch (err) {
+    showToast('保存失败');
+    await loadCapabilities();
+  }
+}
+
+async function setAllCapabilities(enabled) {
+  if (!capabilityPayload || capabilityBusy) return;
+  const keys = capabilityPayload.groups.flatMap(group => (group.items || []).map(item => item.key));
+  capabilityBusy = true;
+  renderCapabilities();
+  try {
+    for (const key of keys) {
+      await fetch(`/api/capabilities/${encodeURIComponent(key)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled })
+      });
+    }
+    await loadCapabilities();
+    showToast(enabled ? '已全部勾选' : '已全部取消');
+  } catch (err) {
+    showToast('批量保存失败');
+    await loadCapabilities();
+  } finally {
+    capabilityBusy = false;
+    renderCapabilities();
+  }
+}
+
+function handleCapabilityWs(msg) {
+  if (msg.type === 'capability_config_changed' || msg.type === 'health_share_changed') {
+    loadCapabilities();
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadCapabilities();
+  connectCommonWS(handleCapabilityWs);
+});
+</script>
+</body>
+</html>

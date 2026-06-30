@@ -4,8 +4,35 @@ WebSocket 连接管理器
 
 import json, logging, time
 from fastapi import WebSocket
+from config import load_worldbook
 
 log = logging.getLogger("ws")
+
+
+def _clean_private_ai_name(ai_name: str | None) -> str:
+    return (ai_name or "").strip() or "AI"
+
+
+def _current_private_ai_name() -> str:
+    try:
+        wb = load_worldbook()
+    except Exception:
+        return "AI"
+    return _clean_private_ai_name(wb.get("ai_name"))
+
+
+def _with_private_notification_sender(event: dict) -> dict:
+    if event.get("type") != "msg_created" or not isinstance(event.get("data"), dict):
+        return dict(event)
+
+    data = dict(event["data"])
+    enriched = dict(event)
+    enriched["data"] = data
+    if data.get("role") == "assistant":
+        sender_name = _current_private_ai_name()
+        data["sender"] = sender_name
+        data["sender_name"] = sender_name
+    return enriched
 
 
 class ConnectionManager:
@@ -149,8 +176,9 @@ class ConnectionManager:
         log.debug("TTS event dropped because no playable client is active: %s", data.get("type"))
 
     async def broadcast(self, data: dict, exclude: WebSocket = None):
-        msg = json.dumps(data, ensure_ascii=False)
-        msg_type = data.get("type", "unknown")
+        payload = _with_private_notification_sender(data)
+        msg = json.dumps(payload, ensure_ascii=False)
+        msg_type = payload.get("type", "unknown")
         targets = [ws for ws in self.active.copy() if ws is not exclude]
         sent = 0
         failed = 0

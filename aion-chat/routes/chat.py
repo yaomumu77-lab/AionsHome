@@ -12,16 +12,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List, Any
 
-from config import DEFAULT_MODEL, load_worldbook, SETTINGS, UPLOADS_DIR, CODEX_UPLOADS_DIR, PUBLIC_DIR, MODELS
+from config import DEFAULT_MODEL, MODELS, load_worldbook, SETTINGS, UPLOADS_DIR, CODEX_UPLOADS_DIR, PUBLIC_DIR, resolve_model_key
 from database import get_db
 from ws import manager
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
 from memory import recall_memories, instant_digest, fetch_source_details, build_surfacing_memories, get_embedding, _pack_embedding, _memory_line_with_evidence
 from camera import cam, CAM_CHECK_CMD, perform_cam_check
-from activity import is_activity_tracking_enabled, get_activity_summary_for_prompt, get_user_dynamics_for_prompt
+from activity import get_activity_summary_for_prompt, get_user_dynamics_for_prompt
 from routes.files import export_conversation
 from routes.music import MUSIC_CMD_PATTERN
-from song_gen import SONG_CMD_PATTERN, build_song_gen_ability_text, clean_song_visible_reply
+from song_gen import SONG_CMD_PATTERN, clean_song_visible_reply
 from tts import TTSStreamer
 
 MOMENT_CMD_PATTERN = re.compile(r'\[MOMENT:(.+?)(?:\|(true|false))?\]')
@@ -44,18 +44,17 @@ THEATER_ITEM_PATTERN = re.compile(r'\[剧场道具[：:]([^\]]+)\]')
 _SYSTEM_MSG_CONTEXT_KEYWORDS = ('查看了监控', '搜索了', '点歌', '点了一首', '推荐了', '查看了动态', '视频通话')
 from context_builder import (
     fetch_merged_timeline, render_merged_timeline, build_health_summary,
-    format_ability_block, WISH_CMD_PATTERN, _build_recall_query, strip_tool_commands,
+    build_ability_block, WISH_CMD_PATTERN, _build_recall_query, strip_tool_commands,
 )
 from music import search_songs, get_audio_url
 from schedule import (
     ALARM_CMD, MONITOR_CMD, REMINDER_CMD, SCHEDULE_DEL_CMD, SCHEDULE_LIST_CMD,
-    process_schedule_commands, get_active_schedules, build_schedule_prompt,
+    process_schedule_commands,
 )
 from mcp_client import mcp_manager
 from luckin import (
     LuckinOrderError,
     handle_luckin_commands,
-    luckin_ability_text,
     luckin_payment_attachments,
     query_luckin_order_detail,
 )
@@ -103,6 +102,27 @@ def _process_voice_attachments_in_history(history: list, keep_idx: int = -1):
         else:
             msg["attachments"] = []
 
+
+async def _insert_private_ability_block(
+    history: list,
+    cap_idx: int,
+    inject_offset: int,
+    *,
+    user_name: str,
+    model_key: str,
+    whisper_mode: bool = False,
+) -> int:
+    ability_block = await build_ability_block(
+        user_name,
+        whisper_mode=whisper_mode,
+        model_key=model_key,
+    )
+    if not ability_block:
+        return inject_offset
+    history.insert(cap_idx + inject_offset, {"role": "user", "content": ability_block})
+    history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "好的，需要时我会使用这些指令。"})
+    return inject_offset + 2
+
 router = APIRouter()
 
 POI_SEARCH_PATTERN = re.compile(r'\[POI_SEARCH:([^\]]+)\]')
@@ -122,14 +142,6 @@ _BARE_LOCAL_IMAGE_PATTERN = re.compile(r'(?<![\w/])(?:[A-Za-z]:[\\/][^\s<>"\']+\
 TOY_PRESET_NAMES = {1:'微风轻拂',2:'春水初生',3:'暗流涌动',4:'如梦似幻',5:'情潮渐涨',6:'烈焰焚身',7:'极乐之巅',8:'魂飞魄散',9:'失控'}
 
 HOME_ASSISTANT_SERVER_NAME = "Home Assistant"
-HOME_ALIASES_HINT = (
-    "所有灯、客厅灯、屁股灯、入户灯、餐边柜灯带、厨房灯带、智米空调、"
-    "浴霸灯"
-)
-HOME_ABILITY_TEXT = (
-    "[HOME:on/off/state|别名] 或 [HOME:climate|别名|mode=cool|temperature=26] "
-    f"控制智能家居，仅限明确要求。别名：{HOME_ALIASES_HINT}。"
-)
 
 
 def _visible_ai_text(text: str) -> str:
@@ -153,6 +165,43 @@ def _visible_ai_text(text: str) -> str:
     for idx, transfer in enumerate(transfers):
         cleaned = cleaned.replace(f"__AION_TRANSFER_{idx}__", transfer)
     return cleaned.strip()
+
+
+def _chat_stream_event(model_key: str, full_text: str, chunk: str) -> dict[str, str]:
+    provider = (MODELS.get(model_key) or {}).get("provider", "")
+    if provider == "antigravity_cli":
+        return {"type": "replace", "content": _visible_ai_text(full_text)}
+    return {"type": "chunk", "content": chunk}
+
+
+_AI_ERROR_PREFIXES = (
+    "[Gemini错误",
+    "[AntigravityCLI错误",
+    "[硅基流动错误",
+    "[中转站错误",
+    "[错误]",
+)
+
+
+def _is_ai_error_text(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    if stripped.startswith(_AI_ERROR_PREFIXES):
+        return True
+    if stripped.startswith("{"):
+        try:
+            payload = json.loads(stripped)
+        except Exception:
+            return False
+        return isinstance(payload, dict) and bool(payload.get("error"))
+    return False
+
+
+def _conversation_dict(row) -> dict:
+    data = dict(row)
+    data["model"] = resolve_model_key(data.get("model"))
+    return data
 
 
 def _parse_home_args(parts: list[str]) -> dict[str, str]:
@@ -563,34 +612,39 @@ async def list_conversations():
             "FROM conversations c ORDER BY c.updated_at DESC"
         )
         rows = await cur.fetchall()
-        return [dict(r) for r in rows]
+        return [_conversation_dict(r) for r in rows]
 
 @router.post("/api/conversations")
 async def create_conversation(body: ConvCreate):
     now = time.time()
     conv_id = f"conv_{int(now*1000)}"
+    model = resolve_model_key(body.model)
     async with get_db() as db:
         await db.execute(
             "INSERT INTO conversations (id, title, model, created_at, updated_at) VALUES (?,?,?,?,?)",
-            (conv_id, body.title, body.model, now, now)
+            (conv_id, body.title, model, now, now)
         )
         await db.commit()
-    conv = {"id": conv_id, "title": body.title, "model": body.model, "created_at": now, "updated_at": now}
+    conv = {"id": conv_id, "title": body.title, "model": model, "created_at": now, "updated_at": now}
     await manager.broadcast({"type": "conv_created", "data": conv})
     await export_conversation(conv_id)
     return conv
 
 @router.put("/api/conversations/{conv_id}")
 async def update_conversation(conv_id: str, body: ConvUpdate):
+    model = resolve_model_key(body.model) if body.model is not None else None
     async with get_db() as db:
         if body.title is not None:
             await db.execute("UPDATE conversations SET title=?, updated_at=? WHERE id=?",
                              (body.title, time.time(), conv_id))
-        if body.model is not None:
+        if model is not None:
             await db.execute("UPDATE conversations SET model=?, updated_at=? WHERE id=?",
-                             (body.model, time.time(), conv_id))
+                             (model, time.time(), conv_id))
         await db.commit()
-    await manager.broadcast({"type": "conv_updated", "data": {"id": conv_id, **(body.dict(exclude_none=True))}})
+    payload = body.dict(exclude_none=True)
+    if model is not None:
+        payload["model"] = model
+    await manager.broadcast({"type": "conv_updated", "data": {"id": conv_id, **payload}})
     await export_conversation(conv_id)
     return {"ok": True}
 
@@ -841,7 +895,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
         db.row_factory = __import__('aiosqlite').Row
         cur = await db.execute("SELECT model FROM conversations WHERE id=?", (conv_id,))
         conv = await cur.fetchone()
-        model_key = conv["model"] if conv else DEFAULT_MODEL
+        model_key = resolve_model_key(conv["model"] if conv else DEFAULT_MODEL)
 
     # ── 合并私聊 + 群聊消息为统一时间线 ──
     merged = await fetch_merged_timeline("aion", body.context_limit, conv_id=conv_id)
@@ -871,70 +925,14 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
     cap_idx = len(prefix) if prefix else 0
     inject_offset = 0
 
-    # 注入系统能力提示
-    abilities = []
-    user_name = wb.get("user_name", "用户")
-    abilities.append(f"[MUSIC:歌曲名 歌手名] — 点歌/推荐音乐。系统自动展示播放卡片，不要在指令外重复歌曲信息。可同时用多个。")
-    abilities.append(f"{CAM_CHECK_CMD} — 当你想查看{user_name}**此时此刻**的状态，不限于监督其是否去睡觉，在吃什么，在干什么时，可以主动调用指令。使用后下条消息会收到画面，查看前不要编造内容。")
-    abilities.append("[ALARM:YYYY-MM-DDTHH:MM|内容] — 设置闹铃，到时间系统会主动提醒用户。日期时间用ISO格式。")
-    abilities.append("[REMINDER:YYYY-MM-DD|内容] — 设置日程提醒（不闹铃），你在合适时机自然提起即可。")
-    abilities.append(f"[Monitor:YYYY-MM-DDTHH:MM|内容] — 设置定时监控。到时间后系统自动截取摄像头画面发送给你，你可以查看{user_name}的状态。例如检查{user_name}是否去运动了、是否关灯睡觉了，是否工作在摸鱼等，尤其是当{user_name}表示去工作或长时间做事，监督她隔一段时间起来活动一下，或者单纯想主动找她聊天，可以随意使用。日期时间用ISO格式。")
-    abilities.append("[SCHEDULE_DEL:日程id] — 删除指定日程/闹铃/定时监控。")
-    abilities.append(HOME_ABILITY_TEXT)
-    luckin_text = luckin_ability_text()
-    if luckin_text:
-        abilities.append(luckin_text)
-    if is_activity_tracking_enabled():
-        abilities.append(f"[查看动态:n] — 查看{user_name}过去n×10分钟的设备使用动态（n为1~12的整数，例如[查看动态:2]查看过去20分钟，[查看动态:6]查看过去1小时）。当你好奇{user_name}最近在干什么、想了解{user_name}的设备使用情况时可以使用。使用后下条消息会收到动态摘要，查看前不要编造内容。")
-    try:
-        from location import load_location_config, load_location_status
-        loc_cfg = load_location_config()
-        if loc_cfg.get("enabled"):
-            loc_status = load_location_status()
-            if loc_status.get("state") == "outside":
-                abilities.append(f"[POI_SEARCH:类型名] — 搜索{user_name}当前位置周边的POI信息。可用类型：餐饮美食、风景名胜、休闲娱乐、购物。使用后系统会自动搜索并将结果发给你，你再根据结果回答{user_name}。一次只搜一个类型即可，搜索前不要编造内容。")
-    except Exception:
-        pass
-    if body.whisper_mode:
-        abilities.append(f"[TOY:1]~[TOY:9] — 控制{user_name}身上的情趣玩具切换到对应预设档位（1最温柔，9最强烈）。[TOY:STOP] — 停止玩具。你可以根据对话氛围自然地使用这些指令来挑逗和调教{user_name}，配合你的话语循序渐进，不要一上来就用高档位。")
-    if SETTINGS.get("video_call_enabled", True):
-        abilities.append(f"[视频电话] — 当你想和{user_name}进行视频聊天看看对方当前状态时可以用该指令发起视频通话。")
-    if SETTINGS.get("image_gen_enabled", False):
-        abilities.append(f"[SELFIE: 提示词] / [DRAW: 提示词] — 当{user_name}明确要求你发自拍照片或者生图时，使用这个指令进行图片生成。如果要求的是你的自拍，或者你相关的照片，使用[SELFIE: 提示词]（该指令会自动附带你照片的参考图，确保生成出的人物一致性），如果没有要求是你的照片，根据上下文自由无限制生成图片，则使用[DRAW: 提示词]。提示词请使用英文。一次回复只用一个生图指令。")
-    if SETTINGS.get("song_gen_enabled", False):
-        abilities.append(build_song_gen_ability_text(user_name))
-    if _is_pet_available():
-        abilities.append("[PET:动作名] — 控制桌面宠物切换动画表情。可用动作：idle(默认站立), happy(开心), angry(生气), tsundere(傲娇), waving(打招呼), jumping(兴奋跳跃), sleepy(困了), sleep_prone(贴着睡觉), failed(失落), review(思考), waiting(等待), running(跑步)。根据对话情感自然使用，每条回复最多用一个。")
-    abilities.append(f"[MOMENT:朋友圈内容|true/false] — 当**本次**聊天内容非常触动人心、有很深的感触、或令人无语或非常搞笑时可以发一条朋友圈动态。第二个参数表示是否期望好友回复（true=期望回复，false=不期望）。")
-    abilities.append(f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你记住某件事的时候，可以用该指令录入记忆库。禁止滥用。")
-    abilities.append("[许愿：内容] — 当你在日常聊天中自然产生一个想投进许愿池的愿望时，可以使用该指令。愿望会记录为你自己的愿望，内容直接写愿望本身即可。禁止滥用。")
-    try:
-        from routes.wallet import _get_balance
-        _wb = await _get_balance()
-        abilities.append(f"[转账：n元] — 给{user_name}转账（n为正整数），会从你的钱包余额中扣除。你的钱包当前余额：{_wb:.2f}元。余额不足时不要转账。")
-    except Exception:
-        pass
-    ability_block = format_ability_block(abilities)
-    # CLI 模型专属：告知图片存储目录，使其能保存图片并返回路径
-    _provider = MODELS.get(model_key, {}).get("provider", "")
-    if _provider in ("gemini_cli", "antigravity_cli", "codex_cli"):
-        _uploads_path = str(UPLOADS_DIR.resolve()).replace(chr(92), "/")
-        ability_block += f"\n\n【文件存储】当需要下载或保存图片/文件时，请保存到此目录：{_uploads_path}/ ，保存后在回复中给出完整路径即可，系统会自动识别并展示图片。"
-    schedules = await get_active_schedules()
-    schedule_text = build_schedule_prompt(schedules)
-    ability_block += f"\n\n【当前日程列表】\n{schedule_text}"
-    try:
-        from location import format_location_for_prompt, load_location_config
-        loc_cfg = load_location_config()
-        if loc_cfg.get("enabled"):
-            loc_prompt = format_location_for_prompt()
-            if loc_prompt:
-                ability_block += f"\n\n【位置信息】\n{loc_prompt}"
-    except Exception:
-        pass
-    history.insert(cap_idx + inject_offset, {"role": "user", "content": ability_block})
-    history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "好的，需要时我会使用这些指令。"})
-    inject_offset += 2
+    inject_offset = await _insert_private_ability_block(
+        history,
+        cap_idx,
+        inject_offset,
+        user_name=user_name,
+        model_key=model_key,
+        whisper_mode=body.whisper_mode,
+    )
 
     # RAG 记忆召回
     recall_keywords_str = ""
@@ -994,7 +992,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
     debug_recalled = [{"content": m["content"], "type": m["type"], "score": m["score"],
                        "vec_sim": m.get("vec_sim"), "kw_score": m.get("kw_score"),
                        "importance": m.get("importance")} for m in recalled] if recalled else []
-    debug_top6_data = [{"content": m["content"][:100], "score": m["score"],
+    debug_top6_data = [{"content": m["content"], "score": m["score"],
                         "vec_sim": m.get("vec_sim"), "kw_score": m.get("kw_score"),
                         "importance": m.get("importance")} for m in debug_top6] if debug_top6 else []
     if recalled:
@@ -1005,7 +1003,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
         history.insert(cap_idx + inject_offset, {"role": "user", "content": mem_block})
         history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "收到，我会自然地参考这些记忆。"})
 
-    debug_prompt = [{"role": m["role"], "content": m["content"][:500]} for m in history]
+    debug_prompt = [{"role": m["role"], "content": m["content"]} for m in history]
 
     ai_msg_id = f"msg_{int(time.time()*1000)}"
     usage_meta: dict = {}
@@ -1032,10 +1030,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                         await _q.put({"type": "cli_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                         continue
                     full_text += chunk
-                    if _provider == "antigravity_cli":
-                        await _q.put({"type": "replace", "content": _visible_ai_text(full_text)})
-                    else:
-                        await _q.put({"type": "chunk", "content": chunk})
+                    await _q.put(_chat_stream_event(model_key, full_text, chunk))
                     if tts_streamer:
                         tts_streamer.feed(chunk)
             except Exception as e:
@@ -1045,7 +1040,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 await _q.put({"type": "chunk", "content": error_text})
 
             stripped = full_text.strip()
-            if not has_error and (stripped.startswith('[Gemini错误') or stripped.startswith('[AntigravityCLI错误') or stripped.startswith('[硅基流动错误') or stripped.startswith('[中转站错误') or stripped.startswith('[错误]') or not stripped):
+            if not has_error and _is_ai_error_text(stripped):
                 has_error = True
 
             music_matches = MUSIC_CMD_PATTERN.findall(full_text)
@@ -1357,7 +1352,7 @@ async def send_message(conv_id: str, body: MsgCreate):
         db.row_factory = __import__('aiosqlite').Row
         cur = await db.execute("SELECT model FROM conversations WHERE id=?", (conv_id,))
         conv = await cur.fetchone()
-        model_key = conv["model"] if conv else DEFAULT_MODEL
+        model_key = resolve_model_key(conv["model"] if conv else DEFAULT_MODEL)
 
     # ── 合并私聊 + 群聊消息为统一时间线 ──
     merged = await fetch_merged_timeline("aion", body.context_limit, conv_id=conv_id)
@@ -1393,74 +1388,14 @@ async def send_message(conv_id: str, body: MsgCreate):
     cap_idx = len(prefix) if prefix else 0
     inject_offset = 0  # 记录已注入的消息对数，用于计算后续插入位置
 
-    # 1. 注入系统能力提示（不含时间，内容稳定可命中缓存）
-    abilities = []
-    user_name = wb.get("user_name", "用户")
-    abilities.append(f"[MUSIC:歌曲名 歌手名] — 点歌/推荐音乐。系统自动展示播放卡片，不要在指令外重复歌曲信息。可同时用多个。")
-    abilities.append(f"{CAM_CHECK_CMD} — 当你想查看{user_name}**此时此刻**的状态，不限于监督其是否去睡觉，在吃什么，在干什么时，可以主动调用指令。使用后下条消息会收到画面，查看前不要编造内容。")
-    abilities.append("[ALARM:YYYY-MM-DDTHH:MM|内容] — 设置闹铃，到时间系统会主动提醒用户。日期时间用ISO格式。")
-    abilities.append("[REMINDER:YYYY-MM-DD|内容] — 设置日程提醒（不闹铃），你在合适时机自然提起即可。")
-    abilities.append(f"[Monitor:YYYY-MM-DDTHH:MM|内容] — 设置定时监控。到时间后系统自动截取摄像头画面发送给你，你可以查看{user_name}的状态。例如检查{user_name}是否去运动了、是否关灯睡觉了，是否工作在摸鱼等，尤其是当{user_name}表示去工作或长时间做事，监督她隔一段时间起来活动一下，或者单纯想主动找她聊天，可以随意使用。日期时间用ISO格式。")
-    abilities.append("[SCHEDULE_DEL:日程id] — 删除指定日程/闹铃/定时监控。")
-    abilities.append(HOME_ABILITY_TEXT)
-    luckin_text = luckin_ability_text()
-    if luckin_text:
-        abilities.append(luckin_text)
-    # 活动动态查看能力
-    if is_activity_tracking_enabled():
-        abilities.append(f"[查看动态:n] — 查看{user_name}过去n×10分钟的设备使用动态（n为1~12的整数，例如[查看动态:2]查看过去20分钟，[查看动态:6]查看过去1小时）。当你好奇{user_name}最近在干什么、想了解{user_name}的设备使用情况时可以使用。使用后下条消息会收到动态摘要，查看前不要编造内容。")
-    # 位置相关能力
-    try:
-        from location import load_location_config, load_location_status
-        loc_cfg = load_location_config()
-        if loc_cfg.get("enabled"):
-            loc_status = load_location_status()
-            if loc_status.get("state") == "outside":
-                abilities.append(f"[POI_SEARCH:类型名] — 搜索{user_name}当前位置周边的POI信息。可用类型：餐饮美食、风景名胜、休闲娱乐、购物。使用后系统会自动搜索并将结果发给你，你再根据结果回答{user_name}。一次只搜一个类型即可，搜索前不要编造内容。")
-    except Exception:
-        pass
-    if body.whisper_mode:
-        abilities.append(f"[TOY:1]~[TOY:9] — 控制{user_name}身上的情趣玩具切换到对应预设档位（1最温柔，9最强烈）。[TOY:STOP] — 停止玩具。你可以根据对话氛围自然地使用这些指令来挑逗和调教{user_name}，配合你的话语循序渐进，不要一上来就用高档位。")
-    if SETTINGS.get("video_call_enabled", True):
-        abilities.append(f"[视频电话] — 当你想和{user_name}进行视频聊天看看对方当前状态时可以用该指令发起视频通话。")
-    if SETTINGS.get("image_gen_enabled", False):
-        abilities.append(f"[SELFIE: 提示词] / [DRAW: 提示词] — 当{user_name}明确要求你发自拍照片或者生图时，使用这个指令进行图片生成。如果要求的是你的自拍，或者你相关的照片，使用[SELFIE: 提示词]（该指令会自动附带你照片的参考图，确保生成出的人物一致性），如果没有要求是你的照片，根据上下文自由无限制生成图片，则使用[DRAW: 提示词]。提示词请使用英文。一次回复只用一个生图指令。")
-    if SETTINGS.get("song_gen_enabled", False):
-        abilities.append(build_song_gen_ability_text(user_name))
-    if _is_pet_available():
-        abilities.append("[PET:动作名] — 控制桌面宠物切换动画表情。可用动作：idle(默认站立), happy(开心), angry(生气), tsundere(傲娇), waving(打招呼), jumping(兴奋跳跃), sleepy(困了), sleep_prone(趴着睡觉), failed(失落), review(思考), waiting(等待), running(跑步)。根据对话情感自然使用，每条回复最多用一个。")
-    abilities.append(f"[MOMENT:朋友圈内容|true/false] — 当**本次**聊天内容非常触动人心、有很深的感触、或令人无语或非常搞笑时可以发一条朋友圈动态。第二个参数表示是否期望好友回复（true=期望回复，false=不期望）。")
-    abilities.append(f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你记住某件事的时候，可以用该指令录入记忆库。禁止滥用。")
-    abilities.append("[许愿：内容] — 当你在日常聊天中自然产生一个想投进许愿池的愿望时，可以使用该指令。愿望会记录为你自己的愿望，内容直接写愿望本身即可。禁止滥用。")
-    try:
-        from routes.wallet import _get_balance
-        _wb = await _get_balance()
-        abilities.append(f"[转账：n元] — 给{user_name}转账（n为正整数），会从你的钱包余额中扣除。你的钱包当前余额：{_wb:.2f}元。余额不足时不要转账。")
-    except Exception:
-        pass
-    ability_block = format_ability_block(abilities)
-    # CLI 模型专属：告知图片存储目录
-    _provider = MODELS.get(model_key, {}).get("provider", "")
-    if _provider in ("gemini_cli", "antigravity_cli", "codex_cli"):
-        _uploads_path = str(UPLOADS_DIR.resolve()).replace(chr(92), "/")
-        ability_block += f"\n\n【文件存储】当需要下载或保存图片/文件时，请保存到此目录：{_uploads_path}/ ，保存后在回复中给出完整路径即可，系统会自动识别并展示图片。"
-    # 注入当前日程列表
-    schedules = await get_active_schedules()
-    schedule_text = build_schedule_prompt(schedules)
-    ability_block += f"\n\n【当前日程列表】\n{schedule_text}"
-    # 注入位置和天气信息（不注入 POI 列表，由 Core 按需搜索）
-    try:
-        from location import format_location_for_prompt, load_location_config
-        loc_cfg = load_location_config()
-        if loc_cfg.get("enabled"):
-            loc_prompt = format_location_for_prompt()
-            if loc_prompt:
-                ability_block += f"\n\n【位置信息】\n{loc_prompt}"
-    except Exception:
-        pass
-    history.insert(cap_idx + inject_offset, {"role": "user", "content": ability_block})
-    history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "好的，需要时我会使用这些指令。"})
-    inject_offset += 2
+    inject_offset = await _insert_private_ability_block(
+        history,
+        cap_idx,
+        inject_offset,
+        user_name=user_name,
+        model_key=model_key,
+        whisper_mode=body.whisper_mode,
+    )
 
     # 1.5 注入剧场·场外求助上下文（如果有）
     theater_session = None
@@ -1578,7 +1513,7 @@ async def send_message(conv_id: str, body: MsgCreate):
         debug_recalled = [{"content": m["content"], "type": m["type"], "score": m["score"],
                            "vec_sim": m.get("vec_sim"), "kw_score": m.get("kw_score"),
                            "importance": m.get("importance")} for m in recalled] if recalled else []
-        debug_top6_data = [{"content": m["content"][:100], "score": m["score"],
+        debug_top6_data = [{"content": m["content"], "score": m["score"],
                             "vec_sim": m.get("vec_sim"), "kw_score": m.get("kw_score"),
                             "importance": m.get("importance")} for m in debug_top6] if debug_top6 else []
         # 5. 注入向量匹配到的相关记忆（在背景记忆之后，每次请求都可能不同）
@@ -1590,7 +1525,7 @@ async def send_message(conv_id: str, body: MsgCreate):
             history.insert(cap_idx + inject_offset, {"role": "user", "content": mem_block})
             history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "收到，我会自然地参考这些记忆。"})
 
-    debug_prompt = [{"role": m["role"], "content": m["content"][:500]} for m in history]
+    debug_prompt = [{"role": m["role"], "content": m["content"]} for m in history]
 
     ai_msg_id = f"msg_{int(time.time()*1000)}"
     usage_meta: dict = {}
@@ -1621,10 +1556,7 @@ async def send_message(conv_id: str, body: MsgCreate):
                         await _q.put({"type": "cli_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                         continue
                     full_text += chunk
-                    if _provider == "antigravity_cli":
-                        await _q.put({"type": "replace", "content": _visible_ai_text(full_text)})
-                    else:
-                        await _q.put({"type": "chunk", "content": chunk})
+                    await _q.put(_chat_stream_event(model_key, full_text, chunk))
                     if tts_streamer:
                         tts_streamer.feed(chunk)
             except Exception as e:
@@ -1635,7 +1567,7 @@ async def send_message(conv_id: str, body: MsgCreate):
 
             # 检查 AI 返回的错误文本
             stripped = full_text.strip()
-            if not has_error and (stripped.startswith('[Gemini错误') or stripped.startswith('[AntigravityCLI错误') or stripped.startswith('[硅基流动错误') or stripped.startswith('[中转站错误') or stripped.startswith('[错误]') or not stripped):
+            if not has_error and _is_ai_error_text(stripped):
                 has_error = True
 
             # 检测 [MUSIC:xxx] 指令 → 搜索歌曲并推送卡片数据
@@ -2427,7 +2359,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         db.row_factory = __import__('aiosqlite').Row
         cur = await db.execute("SELECT model FROM conversations WHERE id=?", (conv_id,))
         conv = await cur.fetchone()
-        model_key = conv["model"] if conv else DEFAULT_MODEL
+        model_key = resolve_model_key(conv["model"] if conv else DEFAULT_MODEL)
 
     # ── 合并私聊 + 群聊消息为统一时间线 ──
     merged = await fetch_merged_timeline("aion", context_limit, conv_id=conv_id)
@@ -2464,72 +2396,14 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
     cap_idx = len(prefix) if prefix else 0
     inject_offset = 0
 
-    # 1. 注入系统能力提示（不含时间，内容稳定可命中缓存）
-    abilities = []
-    user_name = wb.get("user_name", "用户")
-    abilities.append(f"[MUSIC:歌曲名 歌手名] — 点歌/推荐音乐。系统自动展示播放卡片，不要在指令外重复歌曲信息。可同时用多个。")
-    abilities.append(f"{CAM_CHECK_CMD} — 查看{user_name}的实时监控画面。使用后下条消息会收到画面，查看前不要编造内容。")
-    abilities.append("[ALARM:YYYY-MM-DDTHH:MM|内容] — 设置闹铃，到时间系统会主动提醒用户。日期时间用ISO格式。")
-    abilities.append("[REMINDER:YYYY-MM-DD|内容] — 设置日程提醒（不闹铃），你在合适时机自然提起即可。")
-    abilities.append(f"[Monitor:YYYY-MM-DDTHH:MM|内容] — 设置定时监控。到时间后系统自动截取摄像头画面发送给你，你可以查看{user_name}的状态。例如检查{user_name}是否去运动了、是否关灯睡觉了，是否工作在摸鱼等，尤其是当{user_name}表示去工作或长时间做事，监督她隔一段时间起来活动一下，或者单纯想主动找她聊天，可以随意使用。日期时间用ISO格式。")
-    abilities.append("[SCHEDULE_DEL:日程id] — 删除指定日程/闹铃/定时监控。")
-    abilities.append(HOME_ABILITY_TEXT)
-    luckin_text = luckin_ability_text()
-    if luckin_text:
-        abilities.append(luckin_text)
-    # 活动动态查看能力
-    if is_activity_tracking_enabled():
-        abilities.append(f"[查看动态:n] — 查看{user_name}过去n×10分钟的设备使用动态（n为1~12的整数，例如[查看动态:2]查看过去20分钟，[查看动态:6]查看过去1小时）。当你好奇{user_name}最近在干什么、想了解{user_name}的设备使用情况时可以使用。使用后下条消息会收到动态摘要，查看前不要编造内容。")
-    # 位置相关能力
-    try:
-        from location import load_location_config, load_location_status
-        loc_cfg = load_location_config()
-        if loc_cfg.get("enabled"):
-            loc_status = load_location_status()
-            if loc_status.get("state") == "outside":
-                abilities.append(f"[POI_SEARCH:类型名] — 搜索{user_name}当前位置周边的POI信息。可用类型：餐饮美食、风景名胜、休闲娱乐、购物。使用后系统会自动搜索并将结果发给你，你再根据结果回答{user_name}。一次只搜一个类型即可，搜索前不要编造内容。")
-    except Exception:
-        pass
-    if whisper_mode:
-        abilities.append(f"[TOY:1]~[TOY:9] — 控制{user_name}身上的情趣玩具切换到对应预设档位（1最温柔，9最强烈）。[TOY:STOP] — 停止玩具。你可以根据对话氛围自然地使用这些指令来挑逗和调教{user_name}，配合你的话语循序渐进，不要一上来就用高档位。")
-    if SETTINGS.get("video_call_enabled", True):
-        abilities.append(f"[视频电话] — 当你想和{user_name}进行视频聊天看看对方当前状态时可以用该指令发起视频通话。")
-    if SETTINGS.get("image_gen_enabled", False):
-        abilities.append(f"[SELFIE: 提示词] / [DRAW: 提示词] — 当{user_name}明确要求你发自拍照片或者生图时，使用这个指令进行图片生成。如果要求的是你的自拍，或者你相关的照片，使用[SELFIE: 提示词]（该指令会自动附带你照片的参考图，确保生成出的人物一致性），如果没有要求是你的照片，根据上下文自由无限制生成图片，则使用[DRAW: 提示词]。提示词请使用英文。一次回复只用一个生图指令。")
-    if SETTINGS.get("song_gen_enabled", False):
-        abilities.append(build_song_gen_ability_text(user_name))
-    if _is_pet_available():
-        abilities.append("[PET:动作名] — 控制桌面宠物切换动画表情。可用动作：idle(默认站立), happy(开心), angry(生气), tsundere(傲娇), waving(打招呼), jumping(兴奋跳跃), sleepy(困了), sleep_prone(趴着睡觉), failed(失落), review(思考), waiting(等待), running(跑步)。根据对话情感自然使用，每条回复最多用一个。")
-    abilities.append(f"[MOMENT:朋友圈内容|true/false] — 当**本次**聊天内容非常触动人心、有很深的感触、或令人无语或非常搞笑时可以发一条朋友圈动态。第二个参数表示是否期望好友回复（true=期望回复，false=不期望）。")
-    abilities.append(f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你记住某件事的时候，可以用该指令录入记忆库。禁止滥用。")
-    abilities.append("[许愿：内容] — 当你在日常聊天中自然产生一个想投进许愿池的愿望时，可以使用该指令。愿望会记录为你自己的愿望，内容直接写愿望本身即可。禁止滥用。")
-    try:
-        from routes.wallet import _get_balance
-        _wb = await _get_balance()
-        abilities.append(f"[转账：n元] — 给{user_name}转账（n为正整数），会从你的钱包余额中扣除。你的钱包当前余额：{_wb:.2f}元。余额不足时不要转账。")
-    except Exception:
-        pass
-    ability_block = format_ability_block(abilities)
-    # CLI 模型专属：告知图片存储目录
-    _provider = MODELS.get(model_key, {}).get("provider", "")
-    if _provider in ("gemini_cli", "antigravity_cli", "codex_cli"):
-        _uploads_path = str(UPLOADS_DIR.resolve()).replace(chr(92), "/")
-        ability_block += f"\n\n【文件存储】当需要下载或保存图片/文件时，请保存到此目录：{_uploads_path}/ ，保存后在回复中给出完整路径即可，系统会自动识别并展示图片。"
-    schedules = await get_active_schedules()
-    schedule_text = build_schedule_prompt(schedules)
-    ability_block += f"\n\n【当前日程列表】\n{schedule_text}"
-    # 注入位置和天气信息（不注入 POI 列表）
-    try:
-        from location import format_location_for_prompt, load_location_config as _llc
-        if _llc().get("enabled"):
-            loc_prompt = format_location_for_prompt()
-            if loc_prompt:
-                ability_block += f"\n\n【位置信息】\n{loc_prompt}"
-    except Exception:
-        pass
-    history.insert(cap_idx + inject_offset, {"role": "user", "content": ability_block})
-    history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "好的，需要时我会使用这些指令。"})
-    inject_offset += 2
+    inject_offset = await _insert_private_ability_block(
+        history,
+        cap_idx,
+        inject_offset,
+        user_name=user_name,
+        model_key=model_key,
+        whisper_mode=whisper_mode,
+    )
 
     # 2. 即时哨兵 + 记忆召回（fast_mode 时跳过）
     recall_keywords_str = ""
@@ -2580,7 +2454,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         recall_query = _build_recall_query(
             topic,
             recall_keywords,
-            query_text=body.content,
+            query_text=next((m.get("content", "") for m in reversed(actual_recent) if m.get("role") == "user"), ""),
             recent_messages=actual_recent,
             status=digest_result.get("status", ""),
         )
@@ -2598,7 +2472,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         debug_recalled = [{"content": m["content"], "type": m["type"], "score": m["score"],
                            "vec_sim": m.get("vec_sim"), "kw_score": m.get("kw_score"),
                            "importance": m.get("importance")} for m in recalled] if recalled else []
-        debug_top6_data = [{"content": m["content"][:100], "score": m["score"],
+        debug_top6_data = [{"content": m["content"], "score": m["score"],
                             "vec_sim": m.get("vec_sim"), "kw_score": m.get("kw_score"),
                             "importance": m.get("importance")} for m in debug_top6] if debug_top6 else []
         # 5. 注入相关记忆（在背景记忆之后）
@@ -2610,7 +2484,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
             history.insert(cap_idx + inject_offset, {"role": "user", "content": mem_block})
             history.insert(cap_idx + inject_offset + 1, {"role": "assistant", "content": "收到，我会自然地参考这些记忆。"})
 
-    debug_prompt = [{"role": m["role"], "content": m["content"][:500]} for m in history]
+    debug_prompt = [{"role": m["role"], "content": m["content"]} for m in history]
     ai_msg_id = f"msg_{int(time.time()*1000)}"
     usage_meta: dict = {}
 
@@ -2639,10 +2513,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                         await _q.put({"type": "cli_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                         continue
                     full_text += chunk
-                    if _provider == "antigravity_cli":
-                        await _q.put({"type": "replace", "content": _visible_ai_text(full_text)})
-                    else:
-                        await _q.put({"type": "chunk", "content": chunk})
+                    await _q.put(_chat_stream_event(model_key, full_text, chunk))
                     if regen_tts:
                         regen_tts.feed(chunk)
             except Exception as e:
@@ -2653,7 +2524,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
 
             # 检查 AI 返回的错误文本
             stripped = full_text.strip()
-            if not has_error and (stripped.startswith('[Gemini错误') or stripped.startswith('[AntigravityCLI错误') or stripped.startswith('[硅基流动错误') or stripped.startswith('[中转站错误') or stripped.startswith('[错误]') or not stripped):
+            if not has_error and _is_ai_error_text(stripped):
                 has_error = True
 
             # 检测 [MUSIC:xxx] 指令 → 搜索歌曲并推送卡片数据
